@@ -161,6 +161,7 @@ CudaRasterizer::GeometryState CudaRasterizer::GeometryState::fromChunk(char*& ch
 	obtain(chunk, geom.means2D, P, 128);
 	obtain(chunk, geom.cov3D, P * 6, 128);
 	obtain(chunk, geom.conic_opacity, P, 128);
+	obtain(chunk, geom.cov_z, P, 128);
 	obtain(chunk, geom.rgb, P * 3, 128);
 	obtain(chunk, geom.tiles_touched, P, 128);
 	cub::DeviceScan::InclusiveSum(nullptr, geom.scan_size, geom.tiles_touched, geom.tiles_touched, P);
@@ -201,7 +202,7 @@ int CudaRasterizer::Rasterizer::forward(
 	std::function<char* (size_t)> imageBuffer,
 	const int P, int D, int M,
 	const float* background,
-	const int width, int height,
+	const int width, int height, int depth,
 	const float* means3D,
 	const float* shs,
 	const float* colors_precomp,
@@ -216,6 +217,7 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
+	float* out_z_density,
 	int* radii,
 	bool debug)
 {
@@ -245,6 +247,7 @@ int CudaRasterizer::Rasterizer::forward(
 	}
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
+	// Run preprocessing per-Gaussian together with z-info with (mean, variance)
 	CHECK_CUDA(FORWARD::preprocess(
 		P, D, M,
 		means3D,
@@ -267,6 +270,7 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.cov3D,
 		geomState.rgb,
 		geomState.conic_opacity,
+		geomState.cov_z,
 		tile_grid,
 		geomState.tiles_touched,
 		prefiltered
@@ -327,11 +331,34 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.means2D,
 		feature_ptr,
 		geomState.conic_opacity,
+		geomState.cov_z,
+		geomState.depths,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
-		out_color), debug)
-
+		out_color,
+		out_z_density), debug)
+	
+	// For each res on z-density, compute the sum of Gaussians that within 3 stds
+	// of the res. This is used to compute the z-density of the scene.
+	// dim3 z_grid(1, 1, depth);
+	// dim3 z_block(1, 1, 1);
+	// CHECK_CUDA(FORWARD::z_density(
+	// 	P,
+	// 	means3D,
+	// 	(glm::vec3*)scales,
+	// 	scale_modifier,
+	// 	(glm::vec4*)rotations,
+	// 	opacities,
+	// 	cov3D_precomp,
+	// 	viewmatrix, projmatrix,
+	// 	(glm::vec3*)cam_pos,
+	// 	tan_fovx, tan_fovy,
+	// 	focal_x, focal_y,
+	// 	depth,
+	// 	geomState.cov3D,
+	// 	out_z_density), debug)
+	
 	return num_rendered;
 }
 
@@ -361,6 +388,8 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dconic,
 	float* dL_dopacity,
 	float* dL_dcolor,
+	float* dL_dZs,
+	float* dL_dcovz,
 	float* dL_dmean3D,
 	float* dL_dcov3D,
 	float* dL_dsh,
@@ -400,8 +429,12 @@ void CudaRasterizer::Rasterizer::backward(
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
+		dL_dZs,
+		geomState.depths,
+		geomState.cov_z,
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
+		dL_dcovz,
 		dL_dopacity,
 		dL_dcolor), debug)
 
@@ -427,6 +460,7 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dconic,
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,
+		dL_dcovz,
 		dL_dcov3D,
 		dL_dsh,
 		(glm::vec3*)dL_dscale,

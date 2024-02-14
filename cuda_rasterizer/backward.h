@@ -32,8 +32,12 @@ namespace BACKWARD
 		const float* final_Ts,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
+		const float* dL_dZs,
+		const float* depth,
+		const float* cov_z,
 		float3* dL_dmean2D,
 		float4* dL_dconic2D,
+		float* dL_dcovz,
 		float* dL_dopacity,
 		float* dL_dcolors);
 
@@ -56,6 +60,7 @@ namespace BACKWARD
 		const float* dL_dconics,
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
+		float* dL_dcovz,
 		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,

@@ -71,7 +71,7 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 }
 
 // Forward version of 2D covariance matrix computation
-__device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+__device__ float4 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
 {
 	// The following models the steps outlined by equations 29
 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
@@ -85,11 +85,12 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	const float tytz = t.y / t.z;
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
+	float l = sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
 
 	glm::mat3 J = glm::mat3(
 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
 		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
-		0, 0, 0);
+		t.x / l, t.y / l, t.z / l);
 
 	glm::mat3 W = glm::mat3(
 		viewmatrix[0], viewmatrix[4], viewmatrix[8],
@@ -109,7 +110,8 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	// one pixel wide/high. Discard 3rd row and column.
 	cov[0][0] += 0.3f;
 	cov[1][1] += 0.3f;
-	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
+
+	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]), float(cov[2][2]) };
 }
 
 // Forward method for converting scale and rotation properties of each
@@ -175,6 +177,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
+	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered)
@@ -213,9 +216,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Compute 2D screen-space covariance matrix
-	float3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
 
 	// Invert covariance (EWA algorithm)
+	// 这里真的只是在求矩阵的逆，只是对于协方差矩阵可以用这种方法
 	float det = (cov.x * cov.z - cov.y * cov.y);
 	if (det == 0.0f)
 		return;
@@ -247,13 +251,97 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Store some useful helper data for the next steps.
-	depths[idx] = p_view.z;
+	depths[idx] = sqrt(p_view.x * p_view.x + p_view.y * p_view.y + p_view.z * p_view.z);
 	radii[idx] = my_radius;
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
+	cov_z[idx] = cov.w;
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
+
+// Calculate z density integral for each resolution in depth.
+// template<int C>
+// __global__ void calcZDensityCUDA(
+// 	int P,
+// 	const float*  orig_points,
+// 	const glm::vec3* scales,
+// 	const float scale_modifier,
+// 	const glm::vec4* rotations,
+// 	const float* opacities,
+// 	const float* cov3D_precomp,
+// 	const float* viewmatrix,
+// 	const float* projmatrix,
+// 	const glm::vec3* cam_pos,
+// 	const float tan_fovx, float tan_fovy,
+// 	const float focal_x, float focal_y,
+// 	const int depth_res,
+// 	float* cov3Ds,
+// 	// const dim3 grid,
+// 	// uint32_t* tiles_touched,
+// 	float* z_density)
+// {
+// 	auto idx = cg::this_grid().thread_rank();
+// 	if (idx >= P)
+// 		return;
+
+// 	// Initialize radius and touched tiles to 0. If this isn't changed,
+// 	// this Gaussian will not be processed further.
+// 	// radii[idx] = 0;
+// 	// tiles_touched[idx] = 0;
+
+// 	// Perform near culling, quit if outside.
+// 	float3 p_view;
+// 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view))
+// 		return;
+
+// 	// Transform point by projecting
+// 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+// 	// float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+// 	// float p_w = 1.0f / (p_hom.w + 0.0000001f);
+// 	// float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+
+// 	// If 3D covariance matrix is precomputed, use it, otherwise compute
+// 	// from scaling and rotation parameters. 
+// 	const float* cov3D;
+// 	if (cov3D_precomp != nullptr)
+// 	{
+// 		cov3D = cov3D_precomp + idx * 6;
+// 	}
+// 	else
+// 	{
+// 		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+// 		cov3D = cov3Ds + idx * 6;
+// 	}
+
+// 	// Compute 2D screen-space covariance matrix
+// 	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+// 	float var_z = cov.w;
+// 	float mean_z = sqrt(p_view.x * p_view.x + p_view.y * p_view.y + p_view.z * p_view.z);
+
+// 	// WARNING: why varz will be so small??
+// 	if (var_z <= 1e-6f) {
+//     	var_z = 1e-6f;
+// 	}
+
+// 	// Check if the point is in the range of 3-sigma of the z_range
+// 	int z_index_max = depth_res;
+// 	float z_min = mean_z - 3.0f * sqrt(var_z);
+// 	float z_max = mean_z;
+// 	float z_view_max = 5.0;
+// 	float z_view_min = 3.0;
+// 	float delta_z = (z_view_max - z_view_min) / z_index_max;
+// 	int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+// 	int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+
+// 	for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+// 	{
+// 		float z = z_view_min + delta_z * (z_index + 0.5f);
+// 		float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+// 		atomicAdd(&z_density[z_index], density * opacities[idx]);
+// 	}
+// }
+
 
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
@@ -267,10 +355,13 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
+	const float* __restrict__ cov_z,
+	const float* __restrict__ depth,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
-	float* __restrict__ out_color)
+	float* __restrict__ out_color,
+	float* __restrict__ out_z_density)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -295,12 +386,21 @@ renderCUDA(
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
+	__shared__ float collected_cov_z[BLOCK_SIZE];
+	__shared__ float collected_depth[BLOCK_SIZE];
 
 	// Initialize helper variables
 	float T = 1.0f;
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
+
+	// Initialize z info
+	int z_index_max = 200;
+	float z_view_max = 8.0;
+	float z_view_min = 0.0;
+	float delta_z = (z_view_max - z_view_min) / z_index_max;
+	float Z[200] = { 0 };
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -318,6 +418,8 @@ renderCUDA(
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
+			collected_cov_z[block.thread_rank()] = cov_z[coll_id];
+			collected_depth[block.thread_rank()] = depth[coll_id];
 		}
 		block.sync();
 
@@ -335,7 +437,7 @@ renderCUDA(
 			float power = -0.5f * (con_o.x * d.x * d.x + con_o.z * d.y * d.y) - con_o.y * d.x * d.y;
 			if (power > 0.0f)
 				continue;
-
+			
 			// Eq. (2) from 3D Gaussian splatting paper.
 			// Obtain alpha by multiplying with Gaussian opacity
 			// and its exponential falloff from mean.
@@ -356,8 +458,23 @@ renderCUDA(
 
 			T = test_T;
 
+			float var_z = collected_cov_z[j];
+			if (var_z <= 1e-6f) {var_z = 1e-6f;}
+			float mean_z = collected_depth[j];
+			float z_min = mean_z - 3.0f * sqrt(var_z);
+			float z_max = mean_z + 3.0f * sqrt(var_z);
+			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+
+			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			{
+				float z = z_view_min + delta_z * (z_index + 0.5f);
+				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				Z[z_index] += density * alpha;
+			}
+			
 			// Keep track of last range entry to update this
-			// pixel.
+			// pixel. 
 			last_contributor = contributor;
 		}
 	}
@@ -370,6 +487,10 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+		for (int z_index = 0; z_index < z_index_max; z_index++)
+		{
+			atomicAdd(&out_z_density[z_index], Z[z_index]);
+		}
 	}
 }
 
@@ -381,10 +502,13 @@ void FORWARD::render(
 	const float2* means2D,
 	const float* colors,
 	const float4* conic_opacity,
+	const float* cov_z,
+	const float* depth,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
-	float* out_color)
+	float* out_color,
+	float* out_z_density)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
@@ -393,10 +517,13 @@ void FORWARD::render(
 		means2D,
 		colors,
 		conic_opacity,
+		cov_z,
+		depth,
 		final_T,
 		n_contrib,
 		bg_color,
-		out_color);
+		out_color,
+		out_z_density);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -421,9 +548,11 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
+	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered
+	)
 {
 	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
 		P, D, M,
@@ -448,8 +577,49 @@ void FORWARD::preprocess(int P, int D, int M,
 		cov3Ds,
 		rgb,
 		conic_opacity,
+		cov_z,
 		grid,
 		tiles_touched,
 		prefiltered
 		);
 }
+
+// void FORWARD::z_density(
+// 		int P,
+// 		const float* means3D,
+// 		const glm::vec3* scales,
+// 		const float scale_modifier,
+// 		const glm::vec4* rotations,
+// 		const float* opacities,
+// 		const float* cov3D_precomp,
+// 		const float* viewmatrix,
+// 		const float* projmatrix,
+// 		const glm::vec3* cam_pos,
+// 		const float tan_fovx, float tan_fovy,
+// 		const float focal_x, float focal_y,
+// 		const int depth_res,
+// 		float* cov3Ds,
+// 		// const dim3 grid,
+// 		// uint32_t* tiles_touched,
+// 		float* out_z_density)
+// {
+// 	calcZDensityCUDA<1> << <(P + 255) / 256, 256 >> > (
+// 		P,
+// 		means3D,
+// 		scales,
+// 		scale_modifier,
+// 		rotations,
+// 		opacities,
+// 		cov3D_precomp,
+// 		viewmatrix,
+// 		projmatrix,
+// 		cam_pos,
+// 		tan_fovx, tan_fovy,
+// 		focal_x, focal_y,
+// 		depth_res,
+// 		cov3Ds,
+// 		// grid,
+// 		// tiles_touched,
+// 		out_z_density
+// 		);
+// }

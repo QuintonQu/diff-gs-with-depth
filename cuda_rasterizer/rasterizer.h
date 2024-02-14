@@ -34,7 +34,7 @@ namespace CudaRasterizer
 			std::function<char* (size_t)> imageBuffer,
 			const int P, int D, int M,
 			const float* background,
-			const int width, int height,
+			const int width, int height, int depth,
 			const float* means3D,
 			const float* shs,
 			const float* colors_precomp,
@@ -49,6 +49,7 @@ namespace CudaRasterizer
 			const float tan_fovx, float tan_fovy,
 			const bool prefiltered,
 			float* out_color,
+			float* out_z_density,
 			int* radii = nullptr,
 			bool debug = false);
 
@@ -76,6 +77,8 @@ namespace CudaRasterizer
 			float* dL_dconic,
 			float* dL_dopacity,
 			float* dL_dcolor,
+			float* dL_dZs,
+			float* dL_dcovz,
 			float* dL_dmean3D,
 			float* dL_dcov3D,
 			float* dL_dsh,
