@@ -150,6 +150,7 @@ __global__ void computeCov2DCUDA(int P,
 	const float* view_matrix,
 	const float* dL_dconics,
 	const float* dL_dcovz,
+	const float* dL_dl,
 	float3* dL_dmeans,
 	float* dL_dcov)
 {
@@ -310,6 +311,10 @@ __global__ void computeCov2DCUDA(int P,
 	dL_dty += y_grad_mul * ((-ty2/l3 + 1/l) * dL_dJ21 - t.x * t.y / l3 * dL_dJ20 - t.y * t.z / l3 * dL_dJ22);
 	dL_dtz += ((-tz2/l3 + 1/l) * dL_dJ22 - t.x * t.z / l3 * dL_dJ20 - t.y * t.z / l3 * dL_dJ21);
 
+	dL_dtx += t.x / l * dL_dl[idx];
+	dL_dty += t.y / l * dL_dl[idx];
+	dL_dtz += t.z / l * dL_dl[idx];
+
 	// Account for transformation of mean to t
 	// t = transformPoint4x3(mean, view_matrix);
 	float3 dL_dmean = transformVec4x3Transpose({ dL_dtx, dL_dty, dL_dtz }, view_matrix);
@@ -455,6 +460,9 @@ renderCUDA(
 	const float* __restrict__ colors,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
+	const float* __restrict__ fused_mean,
+	const float* __restrict__ fused_var,
+	const uint32_t* __restrict__ first_contrib,
 	const float* __restrict__ dL_dpixels,
 	const float* __restrict__ dL_dZs,
 	const float* __restrict__ depth,
@@ -462,6 +470,7 @@ renderCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dcovz,
+	float* __restrict__ dL_dmeanz,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
@@ -498,6 +507,7 @@ renderCUDA(
 	// Gaussian is known from each pixel from the forward.
 	uint32_t contributor = toDo;
 	const int last_contributor = inside ? n_contrib[pix_id] : 0;
+	const int first_contributor = inside ? first_contrib[pix_id] : 0;
 
 	float accum_rec[C] = { 0 };
 	float dL_dpixel[C];
@@ -513,10 +523,17 @@ renderCUDA(
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	const int z_index_max = 200;
-	const float z_view_max = 8.0;
-	const float z_view_min = 0.0;
-	const float delta_z = (z_view_max - z_view_min) / z_index_max;
+	// const int z_index_max = 200;
+	// const float z_view_max = 8.0;
+	// const float z_view_min = 0.0;
+	// const float delta_z = (z_view_max - z_view_min) / z_index_max;
+
+	float last_fused_mean = inside ? fused_mean[pix_id] : 0;
+	float last_fused_var = inside ? fused_var[pix_id] : 0;
+	float dL_dz = inside ? dL_dZs[pix_id] : 0;
+
+	float final_dL_dcovz = 0.0;
+	bool FLAG = false;
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -556,13 +573,13 @@ renderCUDA(
 				continue;
 			
 			// Get variance as before
-			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-6f) {var_z = 1e-6f;}
-			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
-			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			// float var_z = collected_cov_z[j];
+			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
+			// float mean_z = collected_depth[j];
+			// float z_min = mean_z - 3.0f * sqrt(var_z);
+			// float z_max = mean_z + 3.0f * sqrt(var_z);
+			// int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			// int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
 			const float G = exp(power);
 			const float alpha = min(0.99f, con_o.w * G);
@@ -592,8 +609,6 @@ renderCUDA(
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
 			dL_dalpha *= T;
-			// Update last alpha (to be used in the next iteration)
-			last_alpha = alpha;
 
 			// Account for fact that alpha also influences how much of
 			// the background color is added if nothing left to blend
@@ -619,19 +634,96 @@ renderCUDA(
 			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
 
+			// Update last alpha (to be used in the next iteration)s
+			last_alpha = alpha;
+
 			// Update Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			// for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			// {
+			// 	float z = z_view_min + delta_z * (z_index + 0.5f);
+			// 	float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+			// 	float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
+			// 	atomicAdd(&dL_dcovz[global_id], d_dvarz * alpha * dL_dZs[z_index]); 
+			// 	dL_dalpha += density * dL_dZs[z_index];
+			// }
+
+			// double var_z = collected_cov_z[j];
+			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
+
+			if (contributor < first_contributor - 1)
 			{
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-				float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
-				atomicAdd(&dL_dcovz[global_id], d_dvarz * alpha * dL_dZs[z_index]); 
-				dL_dalpha += density * dL_dZs[z_index];
+				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+				continue;
 			}
+				
+			float this_mean = collected_depth[j];
+			float this_var = 1 / alpha;
+			if (contributor == first_contributor - 1)
+			{
+				// atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
+				atomicAdd(&dL_dmeanz[global_id], dL_dz);
+				dL_dalpha += - pow(alpha, -2) * final_dL_dcovz;
+				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+				FLAG = true;
+				if(abs(last_fused_var - this_var) > 2.f){
+					printf("Huge difference between var for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
+					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
+				}
+				continue;
+			}
+
+			float last_var = last_fused_var * this_var / (this_var - last_fused_var);
+			float last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
+			float mean_diff = this_mean - last_mean;
+			float d_dthis_var = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
+			// float d_dvarz = d_dthis_var / alpha;
+			// atomicAdd(&dL_dcovz[global_id], d_dvarz);
+			float d_dmeanz = last_var / (this_var + last_var) * dL_dz;
+			atomicAdd(&dL_dmeanz[global_id], d_dmeanz);
+			float dalpha = - pow(alpha, -2) * d_dthis_var;
+			dL_dalpha += dalpha;
+			final_dL_dcovz = mean_diff * this_var * pow((last_var + this_var), -2) * dL_dz;
+
+			dL_dz = dL_dz * this_var / (this_var + last_var);
+			last_fused_mean = last_mean;
+			last_fused_var = last_var;
 
 			// Update gradients w.r.t. opacity of the Gaussian
 			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			// check if there is nan derivative
+			if (FLAG){
+				printf("It matches the final variance, but then there is the Gaussian kernel, which can be problematic.\n FLAG: %d, j: %d, toDo: %d, BLOCK_SIZE: %d\n",
+				 FLAG, j, toDo, BLOCK_SIZE);
+				return;
+			}
+			if(isnan(dL_dalpha)){
+				printf("dL_dalpha is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+				return;
+			}
+			if(isnan(dL_dz)){
+				printf("dL_dz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+				return;
+			}
+			if(isnan(final_dL_dcovz)){
+				printf("final_dL_dcovz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+				return;
+			}
+			if(isnan(d_dmeanz)){
+				printf("dL_dmeanz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+				return;
+			}
+			if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (j < toDo - 2 && min(toDo, BLOCK_SIZE) == toDo)){
+				printf("last_var or last_mean is negative, j: %d, toDo: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
+				 j, toDo, BLOCK_SIZE, last_fused_var, last_fused_mean);
+				return;
+			}
 		}
+	}
+
+	if(!FLAG && !done){
+		printf("FLAG is not set, No Last Kernel?? j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+		return;
 	}
 }
 
@@ -655,6 +747,7 @@ void BACKWARD::preprocess(
 	glm::vec3* dL_dmean3D,
 	float* dL_dcolor,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dcov3D,
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
@@ -676,6 +769,7 @@ void BACKWARD::preprocess(
 		viewmatrix,
 		dL_dconic,
 		dL_dcovz,
+		dL_dmeanz,
 		(float3*)dL_dmean3D,
 		dL_dcov3D);
 
@@ -713,6 +807,9 @@ void BACKWARD::render(
 	const float* colors,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
+	const float* fused_mean,
+	const float* fused_var,
+	const uint32_t* first_contrib,
 	const float* dL_dpixels,
 	const float* dL_dZs,
 	const float* depth,
@@ -720,6 +817,7 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dopacity,
 	float* dL_dcolors)
 {
@@ -733,6 +831,9 @@ void BACKWARD::render(
 		colors,
 		final_Ts,
 		n_contrib,
+		fused_mean,
+		fused_var,
+		first_contrib,
 		dL_dpixels,
 		dL_dZs,
 		depth,
@@ -740,6 +841,7 @@ void BACKWARD::render(
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dopacity,
 		dL_dcolors
 		);

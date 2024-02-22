@@ -16,5 +16,6 @@
 #define BLOCK_X 16
 #define BLOCK_Y 16
 #define PI 3.14159265358979323846f
+#define NUM_GS_SAVED 10 // Max Number of saved gaussian samples for each pixel to calculate depth distribution
 
 #endif

@@ -176,6 +176,9 @@ CudaRasterizer::ImageState CudaRasterizer::ImageState::fromChunk(char*& chunk, s
 	obtain(chunk, img.accum_alpha, N, 128);
 	obtain(chunk, img.n_contrib, N, 128);
 	obtain(chunk, img.ranges, N, 128);
+	obtain(chunk, img.fused_mean, N, 128);
+	obtain(chunk, img.fused_var, N, 128);
+	obtain(chunk, img.first_contrib, N, 128);
 	return img;
 }
 
@@ -335,6 +338,9 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.depths,
 		imgState.accum_alpha,
 		imgState.n_contrib,
+		imgState.fused_mean,
+		imgState.fused_var,
+		imgState.first_contrib,
 		background,
 		out_color,
 		out_z_density), debug)
@@ -390,6 +396,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dcolor,
 	float* dL_dZs,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dmean3D,
 	float* dL_dcov3D,
 	float* dL_dsh,
@@ -428,6 +435,9 @@ void CudaRasterizer::Rasterizer::backward(
 		color_ptr,
 		imgState.accum_alpha,
 		imgState.n_contrib,
+		imgState.fused_mean,
+		imgState.fused_var,
+		imgState.first_contrib,
 		dL_dpix,
 		dL_dZs,
 		geomState.depths,
@@ -435,6 +445,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dopacity,
 		dL_dcolor), debug)
 
@@ -461,6 +472,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dcov3D,
 		dL_dsh,
 		(glm::vec3*)dL_dscale,

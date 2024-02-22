@@ -61,6 +61,9 @@ namespace FORWARD
 		const float* depth,
 		float* final_T,
 		uint32_t* n_contrib,
+		float* fused_mean,
+		float* fused_var,
+		uint32_t* first_contrib,
 		const float* bg_color,
 		float* out_color,
 		float* out_z_density);

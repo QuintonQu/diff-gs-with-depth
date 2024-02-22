@@ -68,7 +68,7 @@ RasterizeGaussiansCUDA(
 
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
-  torch::Tensor out_z_density = torch::full({D}, 0.0, float_opts);		// Output distribution of density in dimension z (integrate fully on z)
+  torch::Tensor out_z_density = torch::full({H, W}, 0.0, float_opts);		// Output distribution of density in dimension z (integrate fully on z)
   
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
@@ -157,6 +157,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
   torch::Tensor dL_dcolors = torch::zeros({P, NUM_CHANNELS}, means3D.options());
   torch::Tensor dL_dconic = torch::zeros({P, 2, 2}, means3D.options());
   torch::Tensor dL_dcovz = torch::zeros({P, 1}, means3D.options());
+  torch::Tensor dL_dmeanz = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dopacity = torch::zeros({P, 1}, means3D.options());
   torch::Tensor dL_dcov3D = torch::zeros({P, 6}, means3D.options());
   torch::Tensor dL_dsh = torch::zeros({P, M, 3}, means3D.options());
@@ -191,6 +192,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dcolors.contiguous().data<float>(),
 	  dL_dZs.contiguous().data<float>(),
 	  dL_dcovz.contiguous().data<float>(),
+	  dL_dmeanz.contiguous().data<float>(),
 	  dL_dmeans3D.contiguous().data<float>(),
 	  dL_dcov3D.contiguous().data<float>(),
 	  dL_dsh.contiguous().data<float>(),
