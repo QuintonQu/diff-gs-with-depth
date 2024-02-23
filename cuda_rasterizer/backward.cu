@@ -150,6 +150,7 @@ __global__ void computeCov2DCUDA(int P,
 	const float* view_matrix,
 	const float* dL_dconics,
 	const float* dL_dcovz,
+	const float* dL_dmeanz,
 	float3* dL_dmeans,
 	float* dL_dcov)
 {
@@ -310,6 +311,10 @@ __global__ void computeCov2DCUDA(int P,
 	dL_dty += y_grad_mul * ((-ty2/l3 + 1/l) * dL_dJ21 - t.x * t.y / l3 * dL_dJ20 - t.y * t.z / l3 * dL_dJ22);
 	dL_dtz += ((-tz2/l3 + 1/l) * dL_dJ22 - t.x * t.z / l3 * dL_dJ20 - t.y * t.z / l3 * dL_dJ21);
 
+	dL_dtx += t.x / l * dL_dmeanz[idx];
+	dL_dty += t.y / l * dL_dmeanz[idx];
+	dL_dtz += t.z / l * dL_dmeanz[idx];
+
 	// Account for transformation of mean to t
 	// t = transformPoint4x3(mean, view_matrix);
 	float3 dL_dmean = transformVec4x3Transpose({ dL_dtx, dL_dty, dL_dtz }, view_matrix);
@@ -462,6 +467,7 @@ renderCUDA(
 	float3* __restrict__ dL_dmean2D,
 	float4* __restrict__ dL_dconic2D,
 	float* __restrict__ dL_dcovz,
+	float* __restrict__ dL_dmeanz,
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors)
 {
@@ -559,8 +565,8 @@ renderCUDA(
 			float var_z = collected_cov_z[j];
 			if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
+			float z_min = mean_z - 6.0f * sqrt(var_z);
+			float z_max = mean_z;
 			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
@@ -620,13 +626,25 @@ renderCUDA(
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
 
 			// Update Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
 			{
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-				float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
-				atomicAdd(&dL_dcovz[global_id], d_dvarz * alpha * dL_dZs[z_index]); 
+				float z_front = z_view_min + delta_z * (z_index + 0.001f);
+				float z_back = z_view_min + delta_z * (z_index + 0.999f);
+				float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
+				float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
+				float density = max(0.0f, density_back - density_front);
+
+				float ddensity_front_dvarz = density_front * 0.5f * (z_front - mean_z) * (z_front - mean_z) / (var_z * var_z);
+				float ddensity_back_dvarz = density_back * 0.5f * (z_back - mean_z) * (z_back - mean_z) / (var_z * var_z);
+				ddensity_back_dvarz = max(0.0f, ddensity_back_dvarz);
+				float ddensity_dvarz = ddensity_back_dvarz - ddensity_front_dvarz;
+				atomicAdd(&dL_dcovz[global_id], ddensity_dvarz * alpha * dL_dZs[z_index]); 
 				dL_dalpha += density * dL_dZs[z_index];
+
+				float ddensity_front_dmeanz = density_front * (z_front - mean_z) / var_z;
+				float ddensity_back_dmeanz = density_back * (z_back - mean_z) / var_z;
+				float ddensity_dmeanz = ddensity_back_dmeanz - ddensity_front_dmeanz;
+				atomicAdd(&dL_dmeanz[global_id], ddensity_dmeanz * alpha * dL_dZs[z_index]);
 			}
 
 			// Update gradients w.r.t. opacity of the Gaussian
@@ -655,6 +673,7 @@ void BACKWARD::preprocess(
 	glm::vec3* dL_dmean3D,
 	float* dL_dcolor,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dcov3D,
 	float* dL_dsh,
 	glm::vec3* dL_dscale,
@@ -676,6 +695,7 @@ void BACKWARD::preprocess(
 		viewmatrix,
 		dL_dconic,
 		dL_dcovz,
+		dL_dmeanz,
 		(float3*)dL_dmean3D,
 		dL_dcov3D);
 
@@ -720,6 +740,7 @@ void BACKWARD::render(
 	float3* dL_dmean2D,
 	float4* dL_dconic2D,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dopacity,
 	float* dL_dcolors)
 {
@@ -740,6 +761,7 @@ void BACKWARD::render(
 		dL_dmean2D,
 		dL_dconic2D,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dopacity,
 		dL_dcolors
 		);

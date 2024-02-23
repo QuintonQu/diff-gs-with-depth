@@ -193,9 +193,11 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view))
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+		printf("forward.cu, preprocessCUDA, not in frustum\n");
 		return;
-
+	}
+	
 	// Transform point by projecting
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
@@ -212,8 +214,10 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	else
 	{
 		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
+		// printf("forward.cu, preprocessCUDA, scales: %f, %f, %f, rotations: %f, %f, %f, %f\n", scales[idx].x, scales[idx].y, scales[idx].z, rotations[idx].x, rotations[idx].y, rotations[idx].z, rotations[idx].w);
 		cov3D = cov3Ds + idx * 6;
 	}
+	// printf("forward.cu, preprocessCUDA, cov3D: %f, %f, %f, %f, %f, %f\n", cov3D[0], cov3D[1], cov3D[2], cov3D[3], cov3D[4], cov3D[5]);
 
 	// Compute 2D screen-space covariance matrix
 	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
@@ -234,6 +238,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
 	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
+	// printf("forward.cu, preprocessCUDA, my_radius: %f, det: %f, cov: %f, %f, %f, %f, mid: %f, lambda1, %f, lambda2, %f \n",
+		// my_radius, det, cov.x, cov.y, cov.z, cov.w, mid, lambda1, lambda2);
 	float2 point_image = { ndc2Pix(p_proj.x, W), ndc2Pix(p_proj.y, H) };
 	uint2 rect_min, rect_max;
 	getRect(point_image, my_radius, rect_min, rect_max, grid);
@@ -258,6 +264,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
 	cov_z[idx] = cov.w;
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
+
+	// printf("forward.cu, preprocessCUDA, radii[%d]: %f\n", idx, radii[idx]);
 }
 
 // Calculate z density integral for each resolution in depth.
@@ -396,11 +404,11 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	int z_index_max = 200;
+	const int z_index_max = 200;
 	float z_view_max = 8.0;
 	float z_view_min = 0.0;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
-	float Z[200] = { 0 };
+	float Z[z_index_max] = { 0 };
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -461,15 +469,18 @@ renderCUDA(
 			float var_z = collected_cov_z[j];
 			if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
+			float z_min = mean_z - 6.0f * sqrt(var_z);
+			float z_max = mean_z;
 			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
 			{
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				float z_front = z_view_min + delta_z * (z_index + 0.001f);
+				float z_back = z_view_min + delta_z * (z_index + 0.999f);
+				float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
+				float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
+				float density = max(0.0f, density_back - density_front);
 				Z[z_index] += density * alpha;
 			}
 			

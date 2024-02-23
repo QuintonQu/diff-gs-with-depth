@@ -38,6 +38,7 @@ namespace BACKWARD
 		float3* dL_dmean2D,
 		float4* dL_dconic2D,
 		float* dL_dcovz,
+		float* dL_dmeanz,
 		float* dL_dopacity,
 		float* dL_dcolors);
 
@@ -61,6 +62,7 @@ namespace BACKWARD
 		glm::vec3* dL_dmeans,
 		float* dL_dcolor,
 		float* dL_dcovz,
+		float* dL_dmeanz,
 		float* dL_dcov3D,
 		float* dL_dsh,
 		glm::vec3* dL_dscale,

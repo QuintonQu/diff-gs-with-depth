@@ -232,6 +232,7 @@ int CudaRasterizer::Rasterizer::forward(
 	{
 		radii = geomState.internal_radii;
 	}
+	// printf("rasterize_impl.cu, CudaRasterizer::Rasterizer::forward, is_radii_nullptr? %d\n", radii == nullptr);
 
 	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
 	dim3 block(BLOCK_X, BLOCK_Y, 1);
@@ -390,6 +391,7 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dcolor,
 	float* dL_dZs,
 	float* dL_dcovz,
+	float* dL_dmeanz,
 	float* dL_dmean3D,
 	float* dL_dcov3D,
 	float* dL_dsh,
@@ -435,6 +437,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(float3*)dL_dmean2D,
 		(float4*)dL_dconic,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dopacity,
 		dL_dcolor), debug)
 
@@ -461,6 +464,7 @@ void CudaRasterizer::Rasterizer::backward(
 		(glm::vec3*)dL_dmean3D,
 		dL_dcolor,
 		dL_dcovz,
+		dL_dmeanz,
 		dL_dcov3D,
 		dL_dsh,
 		(glm::vec3*)dL_dscale,
