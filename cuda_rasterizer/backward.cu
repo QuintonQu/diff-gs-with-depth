@@ -637,19 +637,12 @@ renderCUDA(
 			// Update last alpha (to be used in the next iteration)s
 			last_alpha = alpha;
 
-			// Update Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-			// for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-			// {
-			// 	float z = z_view_min + delta_z * (z_index + 0.5f);
-			// 	float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-			// 	float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
-			// 	atomicAdd(&dL_dcovz[global_id], d_dvarz * alpha * dL_dZs[z_index]); 
-			// 	dL_dalpha += density * dL_dZs[z_index];
-			// }
+			// Update gradients w.r.t. opacity of the Gaussian
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
 			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-3f) {var_z = 1e-3f;}
-			// if (var_z >= 1.0) {var_z = 1.0;}
+			if (var_z < 1e-2f) {var_z = 1e-2f;}
+			if (var_z > 1.0) {var_z = 1.0;}
 			// var_z = 1.0;
 			if (contributor < first_contributor - 1)
 			{
@@ -662,50 +655,73 @@ renderCUDA(
 					printf("FLAG is not set, No Last Kernel??\n");
 					return;
 				}
-				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 				continue;
 			}
 				
 			float this_mean = collected_depth[j];
 			float this_var = var_z / alpha;
+			// // if(pix.x == 128 && pix.y == 128){
+			// // 	printf("contributor: %d, this_mean: %f, this_var: %f, last_fused_mean: %f, last_fused_var: %f, dL_dz: %f\n", contributor, this_mean, this_var, last_fused_mean, last_fused_var, dL_dz);
+			// // }
+
 			if (contributor == first_contributor - 1)
 			{
-				if (var_z <= 1e-3f) {final_dL_dcovz = max(0.0, final_dL_dcovz);}
+				dL_dalpha = - pow(alpha, -2) * final_dL_dcovz * var_z;
+				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+				if (var_z < 1e-2f) {final_dL_dcovz = max(0.0, final_dL_dcovz);}
+				if (var_z > 1.0) {final_dL_dcovz = min(0.0, final_dL_dcovz);}
 				atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
 				atomicAdd(&dL_dmeanz[global_id], dL_dz);
-				dL_dalpha += - pow(alpha, -2) * final_dL_dcovz * var_z;
-				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+				
 				FLAG = true;
-				if(abs(last_fused_var - this_var) > 2.f){
+				if(abs(last_fused_var - this_var) > 0.5 * this_var){
 					printf("Huge difference between var for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
 					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
 				}
-				if(abs(last_fused_mean - this_mean) > 2.f){
+				if(abs(last_fused_mean - this_mean) > this_mean){
 					printf("Huge difference between mean for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
 					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
 				}
+				// if(pix.x == 128 && pix.y == 128){
+				// 	printf("contributor: %d, dL_dalpha: %f, dL_dcovz: %f, dL_dmeanz: %f \n", contributor, - pow(alpha, -2) * final_dL_dcovz * var_z, final_dL_dcovz / alpha, dL_dz);
+				// }
 				continue;
 			}
 
-			double last_var = last_fused_var * this_var / (this_var - last_fused_var);
-			double last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
-			double mean_diff = this_mean - last_mean;
-			double d_dthis_var = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
-			double d_dvarz = d_dthis_var / alpha;
-			if (var_z <= 1e-3f) {d_dvarz = max(0.0, d_dvarz);}
-			atomicAdd(&dL_dcovz[global_id], d_dvarz);
-			double d_dmeanz = last_var / (this_var + last_var) * dL_dz;
-			atomicAdd(&dL_dmeanz[global_id], d_dmeanz);
-			double dalpha = - pow(alpha, -2) * d_dthis_var * var_z;
-			dL_dalpha += dalpha;
+			float last_var = last_fused_var * this_var / (this_var - last_fused_var);
+			float last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
+			float mean_diff = this_mean - last_mean;
+			float dL_dvar = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
+			float dL_dmeanz_ = (last_var * pow(last_var + this_var, -1)) * dL_dz;
+			dL_dalpha = - pow(alpha, -2) * dL_dvar * var_z;
+			float dL_dcovz_ = dL_dvar / alpha;
 			final_dL_dcovz = mean_diff * this_var * pow((last_var + this_var), -2) * dL_dz;
 
-			// dL_dz = dL_dz * this_var / (this_var + last_var);
+			if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
+			if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
+			
+			atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
+			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
+			if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
+			
+			atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
+			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
+			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			dL_dz = dL_dz * this_var / (this_var + last_var);
 			last_fused_mean = last_mean;
 			last_fused_var = last_var;
 
-			// Update gradients w.r.t. opacity of the Gaussian
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			// WARNING ONLY FOR TEST
+			// if(pix.x == 128 && pix.y == 128){
+			// 	printf("contributor: %d, last_var: %f, last_mean: %f, dL_dmeanz_: %f, dL_dalpha2: %f, dL_dcovz_: %f,  dL_dz: %f\n",
+			// 	contributor, last_var, last_mean, dL_dmeanz_, dL_dalpha, dL_dcovz_, dL_dz);
+			// }
 
 			// check if there is nan derivative
 			if(isnan(dL_dalpha)){
@@ -720,13 +736,13 @@ renderCUDA(
 				printf("final_dL_dcovz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
 				return;
 			}
-			if(isnan(d_dmeanz)){
+			if(isnan(dL_dmeanz_)){
 				printf("dL_dmeanz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
 				return;
 			}
 			if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (contributor > first_contributor)){
-				printf("last_var or last_mean is negative, j: %d, toDo: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
-				 j, toDo, BLOCK_SIZE, last_fused_var, last_fused_mean);
+				printf("last_var or last_mean is negative, contributor: %d, first_contributor: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
+				 contributor, first_contributor, BLOCK_SIZE, last_fused_var, last_fused_mean);
 				return;
 			}
 		}

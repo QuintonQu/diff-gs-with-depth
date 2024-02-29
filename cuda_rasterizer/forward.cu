@@ -398,18 +398,22 @@ renderCUDA(
 			last_contributor = contributor;
 
 			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-3f) {var_z = 1e-3f;}
-			// if (var_z >= 1.0) {var_z = 1.0;}
+			float mean_z = collected_depth[j];
+			if (var_z < 1e-2f) {var_z = 1e-2f;}
+			if (var_z > 1.0) {var_z = 1.0;}
 			// var_z = 1.0;
 			if (var_fused < 0.0f)
 			{
-				mean_fused = collected_depth[j];
+				if (first_contributor != 0){
+					printf("first_contributor: %d\n", first_contributor);
+				}
+				mean_fused = mean_z;
 				var_fused = var_z / alpha;
 				first_contributor = contributor;
 			}
 			else
 			{
-				float mean_new = collected_depth[j];
+				float mean_new = mean_z;
 				float var_new = var_z / alpha;
 				float mean_old = mean_fused;
 				float var_old = var_fused;
@@ -417,6 +421,10 @@ renderCUDA(
 				mean_fused = mean_old + mean_diff * var_old / (var_old + var_new);
 				var_fused = var_old * var_new / (var_old + var_new);
 			}
+
+			// if(pix.x == 128 && pix.y == 128){
+			// 	printf("contributor: %d, alpha: %f, mean_z: %f, var_z: %f, mean_fused: %f, var_fused: %f\n", contributor, alpha, mean_z, var_z, mean_fused, var_fused);
+			// }
 
 			T = test_T;
 		}
