@@ -528,8 +528,8 @@ renderCUDA(
 	// const float z_view_min = 0.0;
 	// const float delta_z = (z_view_max - z_view_min) / z_index_max;
 
-	float last_fused_mean = inside ? fused_mean[pix_id] : 0;
-	float last_fused_var = inside ? fused_var[pix_id] : 0;
+	double last_fused_mean = inside ? fused_mean[pix_id] : 0;
+	double last_fused_var = inside ? fused_var[pix_id] : 0;
 	float dL_dz = inside ? dL_dZs[pix_id] : 0;
 
 	float final_dL_dcovz = 0.0;
@@ -647,44 +647,60 @@ renderCUDA(
 			// 	dL_dalpha += density * dL_dZs[z_index];
 			// }
 
-			// double var_z = collected_cov_z[j];
-			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
-
+			float var_z = collected_cov_z[j];
+			if (var_z <= 1e-3f) {var_z = 1e-3f;}
+			// if (var_z >= 1.0) {var_z = 1.0;}
+			// var_z = 1.0;
 			if (contributor < first_contributor - 1)
 			{
+				if (FLAG){
+					printf("It matches the final variance, but then there is the Gaussian kernel, which can be problematic.\n FLAG: %d, j: %d, toDo: %d, BLOCK_SIZE: %d\n",
+					FLAG, j, toDo, BLOCK_SIZE);
+					return;
+				}
+				if(!FLAG){
+					printf("FLAG is not set, No Last Kernel??\n");
+					return;
+				}
 				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 				continue;
 			}
 				
 			float this_mean = collected_depth[j];
-			float this_var = 1 / alpha;
+			float this_var = var_z / alpha;
 			if (contributor == first_contributor - 1)
 			{
-				// atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
+				if (var_z <= 1e-3f) {final_dL_dcovz = max(0.0, final_dL_dcovz);}
+				atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
 				atomicAdd(&dL_dmeanz[global_id], dL_dz);
-				dL_dalpha += - pow(alpha, -2) * final_dL_dcovz;
+				dL_dalpha += - pow(alpha, -2) * final_dL_dcovz * var_z;
 				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 				FLAG = true;
 				if(abs(last_fused_var - this_var) > 2.f){
 					printf("Huge difference between var for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
 					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
 				}
+				if(abs(last_fused_mean - this_mean) > 2.f){
+					printf("Huge difference between mean for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
+					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
+				}
 				continue;
 			}
 
-			float last_var = last_fused_var * this_var / (this_var - last_fused_var);
-			float last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
-			float mean_diff = this_mean - last_mean;
-			float d_dthis_var = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
-			// float d_dvarz = d_dthis_var / alpha;
-			// atomicAdd(&dL_dcovz[global_id], d_dvarz);
-			float d_dmeanz = last_var / (this_var + last_var) * dL_dz;
+			double last_var = last_fused_var * this_var / (this_var - last_fused_var);
+			double last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
+			double mean_diff = this_mean - last_mean;
+			double d_dthis_var = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
+			double d_dvarz = d_dthis_var / alpha;
+			if (var_z <= 1e-3f) {d_dvarz = max(0.0, d_dvarz);}
+			atomicAdd(&dL_dcovz[global_id], d_dvarz);
+			double d_dmeanz = last_var / (this_var + last_var) * dL_dz;
 			atomicAdd(&dL_dmeanz[global_id], d_dmeanz);
-			float dalpha = - pow(alpha, -2) * d_dthis_var;
+			double dalpha = - pow(alpha, -2) * d_dthis_var * var_z;
 			dL_dalpha += dalpha;
 			final_dL_dcovz = mean_diff * this_var * pow((last_var + this_var), -2) * dL_dz;
 
-			dL_dz = dL_dz * this_var / (this_var + last_var);
+			// dL_dz = dL_dz * this_var / (this_var + last_var);
 			last_fused_mean = last_mean;
 			last_fused_var = last_var;
 
@@ -692,11 +708,6 @@ renderCUDA(
 			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
 			// check if there is nan derivative
-			if (FLAG){
-				printf("It matches the final variance, but then there is the Gaussian kernel, which can be problematic.\n FLAG: %d, j: %d, toDo: %d, BLOCK_SIZE: %d\n",
-				 FLAG, j, toDo, BLOCK_SIZE);
-				return;
-			}
 			if(isnan(dL_dalpha)){
 				printf("dL_dalpha is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
 				return;
@@ -713,17 +724,12 @@ renderCUDA(
 				printf("dL_dmeanz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
 				return;
 			}
-			if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (j < toDo - 2 && min(toDo, BLOCK_SIZE) == toDo)){
+			if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (contributor > first_contributor)){
 				printf("last_var or last_mean is negative, j: %d, toDo: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
 				 j, toDo, BLOCK_SIZE, last_fused_var, last_fused_mean);
 				return;
 			}
 		}
-	}
-
-	if(!FLAG && !done){
-		printf("FLAG is not set, No Last Kernel?? j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
-		return;
 	}
 }
 

@@ -378,8 +378,6 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
-			T = test_T;
-
 			// float var_z = collected_cov_z[j];
 			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			// float mean_z = collected_depth[j];
@@ -399,24 +397,28 @@ renderCUDA(
 			// pixel. 
 			last_contributor = contributor;
 
-			// float var_z = collected_cov_z[j];
-			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
+			float var_z = collected_cov_z[j];
+			if (var_z <= 1e-3f) {var_z = 1e-3f;}
+			// if (var_z >= 1.0) {var_z = 1.0;}
+			// var_z = 1.0;
 			if (var_fused < 0.0f)
 			{
 				mean_fused = collected_depth[j];
-				var_fused = 1 / alpha;
+				var_fused = var_z / alpha;
 				first_contributor = contributor;
 			}
 			else
 			{
 				float mean_new = collected_depth[j];
-				float var_new = 1 / alpha;
+				float var_new = var_z / alpha;
 				float mean_old = mean_fused;
 				float var_old = var_fused;
 				float mean_diff = mean_new - mean_old;
 				mean_fused = mean_old + mean_diff * var_old / (var_old + var_new);
 				var_fused = var_old * var_new / (var_old + var_new);
 			}
+
+			T = test_T;
 		}
 	}
 
@@ -432,6 +434,12 @@ renderCUDA(
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		out_z_density[pix_id] = mean_fused;
 		first_contrib[pix_id] = first_contributor;
+
+		// if(mean_fused <= 0.0f || var_fused <= 0.0f)
+		// {
+		// 	out_z_density[pix_id] = 0.0f;
+		// 	printf("mean_fused: %f, var_fused: %f\n", mean_fused, var_fused);
+		// }
 	}
 }
 
