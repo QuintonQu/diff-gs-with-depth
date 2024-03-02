@@ -194,7 +194,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// Perform near culling, quit if outside.
 	float3 p_view;
 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
-		printf("forward.cu, preprocessCUDA, not in frustum\n");
+		// printf("forward.cu, preprocessCUDA, not in frustum\n");
 		return;
 	}
 	
@@ -469,18 +469,25 @@ renderCUDA(
 			float var_z = collected_cov_z[j];
 			if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			float mean_z = collected_depth[j];
-			float z_min = mean_z - 6.0f * sqrt(var_z);
-			float z_max = mean_z;
+			float z_min = mean_z - 3.0f * sqrt(var_z);
+			float z_max = mean_z + 3.0f * sqrt(var_z);
 			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
-			for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
+			// for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
+			// {
+			// 	float z_front = z_view_min + delta_z * (z_index + 0.001f);
+			// 	float z_back = z_view_min + delta_z * (z_index + 0.999f);
+			// 	float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
+			// 	float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
+			// 	float density = max(0.0f, density_back - density_front);
+			// 	Z[z_index] += density * alpha;
+			// }
+
+			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
 			{
-				float z_front = z_view_min + delta_z * (z_index + 0.001f);
-				float z_back = z_view_min + delta_z * (z_index + 0.999f);
-				float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
-				float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
-				float density = max(0.0f, density_back - density_front);
+				float z = z_view_min + delta_z * (z_index + 0.5f);
+				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
 				Z[z_index] += density * alpha;
 			}
 			
@@ -499,9 +506,7 @@ renderCUDA(
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		for (int z_index = 0; z_index < z_index_max; z_index++)
-		{
 			atomicAdd(&out_z_density[z_index], Z[z_index]);
-		}
 	}
 }
 
