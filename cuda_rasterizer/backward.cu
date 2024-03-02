@@ -523,14 +523,22 @@ renderCUDA(
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	// const int z_index_max = 200;
-	// const float z_view_max = 8.0;
-	// const float z_view_min = 0.0;
-	// const float delta_z = (z_view_max - z_view_min) / z_index_max;
+	const int z_index_max = 200;
+	const float z_view_max = 8.0;
+	const float z_view_min = 0.0;
+	const float delta_z = (z_view_max - z_view_min) / z_index_max;
+	float dL_dZ[z_index_max];
+	if (inside){
+		for (int i = 0; i < z_index_max; i++){
+			dL_dZ[i] = dL_dZs[z_index_max * (pix.y / H) + i];
+			// if (pix.y > 0)
+			// 	dL_dZ[i] += dL_dZs[z_index_max * (pix.y - 1) + i];
+		}
+	}	
 
-	double last_fused_mean = inside ? fused_mean[pix_id] : 0;
-	double last_fused_var = inside ? fused_var[pix_id] : 0;
-	float dL_dz = inside ? dL_dZs[pix_id] : 0;
+	// double last_fused_mean = inside ? fused_mean[pix_id] : 0;
+	// double last_fused_var = inside ? fused_var[pix_id] : 0;
+	// float dL_dz = inside ? dL_dZs[pix_id] : 0;
 
 	float final_dL_dcovz = 0.0;
 	bool FLAG = false;
@@ -573,13 +581,13 @@ renderCUDA(
 				continue;
 			
 			// Get variance as before
-			// float var_z = collected_cov_z[j];
-			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
-			// float mean_z = collected_depth[j];
-			// float z_min = mean_z - 3.0f * sqrt(var_z);
-			// float z_max = mean_z + 3.0f * sqrt(var_z);
-			// int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			// int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			float var_z = collected_cov_z[j];
+			if (var_z <= 1e-6f) {var_z = 1e-6f;}
+			float mean_z = collected_depth[j];
+			float z_min = mean_z - 3.0f * sqrt(var_z);
+			float z_max = mean_z + 3.0f * sqrt(var_z);;
+			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
 			const float G = exp(power);
 			const float alpha = min(0.99f, con_o.w * G);
@@ -609,6 +617,8 @@ renderCUDA(
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
 			dL_dalpha *= T;
+			// Update last alpha (to be used in the next iteration)s
+			last_alpha = alpha;
 
 			// Account for fact that alpha also influences how much of
 			// the background color is added if nothing left to blend
@@ -634,117 +644,134 @@ renderCUDA(
 			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
 
-			// Update last alpha (to be used in the next iteration)s
-			last_alpha = alpha;
+			// Update mean and variance gradients
+			float dL_dmeanz_total = 0.0f;
+			float dL_dcovz_total = 0.0f;
+			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			{
+				float z = z_view_min + delta_z * (z_index + 0.5f);
+				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
+				dL_dcovz_total += d_dvarz * alpha * dL_dZ[z_index]; 
+				float d_dmeanz = density * (z - mean_z) / var_z;
+				dL_dmeanz_total += d_dmeanz * alpha * dL_dZ[z_index];
+				if (isnan(dL_dcovz_total)) { printf("ddensity_dvarz is nan \n");}
+				if (isinf(dL_dcovz_total)) { printf("ddensity_dvarz is inf \n");}
+				dL_dalpha += density * dL_dZ[z_index];
+			}
+			atomicAdd(&dL_dcovz[global_id], dL_dcovz_total);
+			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_total);
+			
 
 			// Update gradients w.r.t. opacity of the Gaussian
 			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
-			float var_z = collected_cov_z[j];
-			if (var_z < 1e-2f) {var_z = 1e-2f;}
-			if (var_z > 1.0) {var_z = 1.0;}
-			// var_z = 1.0;
-			if (contributor < first_contributor - 1)
-			{
-				if (FLAG){
-					printf("It matches the final variance, but then there is the Gaussian kernel, which can be problematic.\n FLAG: %d, j: %d, toDo: %d, BLOCK_SIZE: %d\n",
-					FLAG, j, toDo, BLOCK_SIZE);
-					return;
-				}
-				if(!FLAG){
-					printf("FLAG is not set, No Last Kernel??\n");
-					return;
-				}
-				continue;
-			}
+
+			// float var_z = collected_cov_z[j];
+			// if (var_z < 1e-2f) {var_z = 1e-2f;}
+			// if (var_z > 1.0) {var_z = 1.0;}
+			// // var_z = 1.0;
+			// if (contributor < first_contributor - 1)
+			// {
+			// 	if (FLAG){
+			// 		printf("It matches the final variance, but then there is the Gaussian kernel, which can be problematic.\n FLAG: %d, j: %d, toDo: %d, BLOCK_SIZE: %d\n",
+			// 		FLAG, j, toDo, BLOCK_SIZE);
+			// 		return;
+			// 	}
+			// 	if(!FLAG){
+			// 		printf("FLAG is not set, No Last Kernel??\n");
+			// 		return;
+			// 	}
+			// 	continue;
+			// }
 				
-			float this_mean = collected_depth[j];
-			float this_var = var_z / alpha;
-			// // if(pix.x == 128 && pix.y == 128){
-			// // 	printf("contributor: %d, this_mean: %f, this_var: %f, last_fused_mean: %f, last_fused_var: %f, dL_dz: %f\n", contributor, this_mean, this_var, last_fused_mean, last_fused_var, dL_dz);
-			// // }
+			// float this_mean = collected_depth[j];
+			// float this_var = var_z / alpha;
+			// // // if(pix.x == 128 && pix.y == 128){
+			// // // 	printf("contributor: %d, this_mean: %f, this_var: %f, last_fused_mean: %f, last_fused_var: %f, dL_dz: %f\n", contributor, this_mean, this_var, last_fused_mean, last_fused_var, dL_dz);
+			// // // }
 
-			if (contributor == first_contributor - 1)
-			{
-				dL_dalpha = - pow(alpha, -2) * final_dL_dcovz * var_z;
-				atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+			// if (contributor == first_contributor - 1)
+			// {
+			// 	dL_dalpha = - pow(alpha, -2) * final_dL_dcovz * var_z;
+			// 	atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
 
-				if (var_z < 1e-2f) {final_dL_dcovz = max(0.0, final_dL_dcovz);}
-				if (var_z > 1.0) {final_dL_dcovz = min(0.0, final_dL_dcovz);}
-				atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
-				atomicAdd(&dL_dmeanz[global_id], dL_dz);
+			// 	if (var_z < 1e-2f) {final_dL_dcovz = max(0.0, final_dL_dcovz);}
+			// 	if (var_z > 1.0) {final_dL_dcovz = min(0.0, final_dL_dcovz);}
+			// 	atomicAdd(&dL_dcovz[global_id], final_dL_dcovz / alpha);
+			// 	atomicAdd(&dL_dmeanz[global_id], dL_dz);
 				
-				FLAG = true;
-				if(abs(last_fused_var - this_var) > 0.5 * this_var){
-					printf("Huge difference between var for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
-					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
-				}
-				if(abs(last_fused_mean - this_mean) > this_mean){
-					printf("Huge difference between mean for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
-					j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
-				}
-				// if(pix.x == 128 && pix.y == 128){
-				// 	printf("contributor: %d, dL_dalpha: %f, dL_dcovz: %f, dL_dmeanz: %f \n", contributor, - pow(alpha, -2) * final_dL_dcovz * var_z, final_dL_dcovz / alpha, dL_dz);
-				// }
-				continue;
-			}
-
-			float last_var = last_fused_var * this_var / (this_var - last_fused_var);
-			float last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
-			float mean_diff = this_mean - last_mean;
-			float dL_dvar = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
-			float dL_dmeanz_ = (last_var * pow(last_var + this_var, -1)) * dL_dz;
-			dL_dalpha = - pow(alpha, -2) * dL_dvar * var_z;
-			float dL_dcovz_ = dL_dvar / alpha;
-			final_dL_dcovz = mean_diff * this_var * pow((last_var + this_var), -2) * dL_dz;
-
-			if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
-			if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
-			
-			atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
-			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
-
-			if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
-			if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
-			
-			atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
-			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
-			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
-
-			dL_dz = dL_dz * this_var / (this_var + last_var);
-			last_fused_mean = last_mean;
-			last_fused_var = last_var;
-
-
-			// WARNING ONLY FOR TEST
-			// if(pix.x == 128 && pix.y == 128){
-			// 	printf("contributor: %d, last_var: %f, last_mean: %f, dL_dmeanz_: %f, dL_dalpha2: %f, dL_dcovz_: %f,  dL_dz: %f\n",
-			// 	contributor, last_var, last_mean, dL_dmeanz_, dL_dalpha, dL_dcovz_, dL_dz);
+			// 	FLAG = true;
+			// 	if(abs(last_fused_var - this_var) > 0.5 * this_var){
+			// 		printf("Huge difference between var for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
+			// 		j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
+			// 	}
+			// 	if(abs(last_fused_mean - this_mean) > this_mean){
+			// 		printf("Huge difference between mean for forward and backward! j: %d, toDo: %d, BLOCK_SIZE: %d, last_fused_var: %f, this_var: %f, last_fused_mean: %f, this_mean: %f, global_id: %d\n",
+			// 		j, toDo, BLOCK_SIZE, last_fused_var, this_var, last_fused_mean, this_mean, global_id);
+			// 	}
+			// 	// if(pix.x == 128 && pix.y == 128){
+			// 	// 	printf("contributor: %d, dL_dalpha: %f, dL_dcovz: %f, dL_dmeanz: %f \n", contributor, - pow(alpha, -2) * final_dL_dcovz * var_z, final_dL_dcovz / alpha, dL_dz);
+			// 	// }
+			// 	continue;
 			// }
 
-			// check if there is nan derivative
-			if(isnan(dL_dalpha)){
-				printf("dL_dalpha is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
-				return;
-			}
-			if(isnan(dL_dz)){
-				printf("dL_dz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
-				return;
-			}
-			if(isnan(final_dL_dcovz)){
-				printf("final_dL_dcovz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
-				return;
-			}
-			if(isnan(dL_dmeanz_)){
-				printf("dL_dmeanz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
-				return;
-			}
-			if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (contributor > first_contributor)){
-				printf("last_var or last_mean is negative, contributor: %d, first_contributor: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
-				 contributor, first_contributor, BLOCK_SIZE, last_fused_var, last_fused_mean);
-				return;
-			}
+			// float last_var = last_fused_var * this_var / (this_var - last_fused_var);
+			// float last_mean = (last_fused_mean * (this_var + last_var) - this_mean * last_var) / this_var;
+			// float mean_diff = this_mean - last_mean;
+			// float dL_dvar = (- mean_diff * last_var * pow(last_var + this_var, -2)) * dL_dz;
+			// float dL_dmeanz_ = (last_var * pow(last_var + this_var, -1)) * dL_dz;
+			// dL_dalpha = - pow(alpha, -2) * dL_dvar * var_z;
+			// float dL_dcovz_ = dL_dvar / alpha;
+			// final_dL_dcovz = mean_diff * this_var * pow((last_var + this_var), -2) * dL_dz;
+
+			// if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
+			// if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
+			
+			// atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
+			// atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
+			// atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			// if (var_z < 1e-2f) {dL_dcovz_ = max(0.0, dL_dcovz_);}
+			// if (var_z > 1.0) {dL_dcovz_ = min(0.0, dL_dcovz_);}
+			
+			// atomicAdd(&dL_dcovz[global_id], dL_dcovz_);
+			// atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_);
+			// atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
+
+			// dL_dz = dL_dz * this_var / (this_var + last_var);
+			// last_fused_mean = last_mean;
+			// last_fused_var = last_var;
+
+
+			// // WARNING ONLY FOR TEST
+			// // if(pix.x == 128 && pix.y == 128){
+			// // 	printf("contributor: %d, last_var: %f, last_mean: %f, dL_dmeanz_: %f, dL_dalpha2: %f, dL_dcovz_: %f,  dL_dz: %f\n",
+			// // 	contributor, last_var, last_mean, dL_dmeanz_, dL_dalpha, dL_dcovz_, dL_dz);
+			// // }
+
+			// // check if there is nan derivative
+			// if(isnan(dL_dalpha)){
+			// 	printf("dL_dalpha is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+			// 	return;
+			// }
+			// if(isnan(dL_dz)){
+			// 	printf("dL_dz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+			// 	return;
+			// }
+			// if(isnan(final_dL_dcovz)){
+			// 	printf("final_dL_dcovz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+			// 	return;
+			// }
+			// if(isnan(dL_dmeanz_)){
+			// 	printf("dL_dmeanz is nan, j: %d, toDo: %d, BLOCK_SIZE: %d\n", j, toDo, BLOCK_SIZE);
+			// 	return;
+			// }
+			// if((last_fused_var <= 0.0 || last_fused_mean <= 0.0) && (contributor > first_contributor)){
+			// 	printf("last_var or last_mean is negative, contributor: %d, first_contributor: %d, BLOCK_SIZE: %d, last_var: %f, last_mean: %f\n",
+			// 	 contributor, first_contributor, BLOCK_SIZE, last_fused_var, last_fused_mean);
+			// 	return;
+			// }
 		}
 	}
 }

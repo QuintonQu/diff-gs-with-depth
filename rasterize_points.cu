@@ -68,7 +68,7 @@ RasterizeGaussiansCUDA(
 
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
-  torch::Tensor out_z_density = torch::full({H, W}, 0.0, float_opts);		// Output distribution of density in dimension z (integrate fully on z)
+  torch::Tensor out_z_density = torch::full({int(H / H), D}, 0.0, float_opts);		// Output distribution of density in dimension z (integrate fully on z)
   
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);

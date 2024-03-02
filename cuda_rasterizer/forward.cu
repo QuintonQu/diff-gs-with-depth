@@ -317,12 +317,13 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	// int z_index_max = 200;
-	// float z_view_max = 8.0;
-	// float z_view_min = 0.0;
-	// float delta_z = (z_view_max - z_view_min) / z_index_max;
-	float var_fused = -1.0f;
-	float mean_fused = 0.0f;
+	const int z_index_max = 200;
+	float z_view_max = 8.0;
+	float z_view_min = 0.0;
+	float delta_z = (z_view_max - z_view_min) / z_index_max;
+	float Z[z_index_max] = { 0 };
+	// float var_fused = -1.0f;
+	// float mean_fused = 0.0f;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -378,55 +379,56 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
-			// float var_z = collected_cov_z[j];
-			// if (var_z <= 1e-6f) {var_z = 1e-6f;}
-			// float mean_z = collected_depth[j];
-			// float z_min = mean_z - 3.0f * sqrt(var_z);
-			// float z_max = mean_z + 3.0f * sqrt(var_z);
-			// int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			// int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			T = test_T;
 
-			// for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-			// {
-			// 	float z = z_view_min + delta_z * (z_index + 0.5f);
-			// 	float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-			// 	Z[z_index] += density * alpha;
-			// }
+			float var_z = collected_cov_z[j];
+			if (var_z <= 1e-6f) {var_z = 1e-6f;}
+			float mean_z = collected_depth[j];
+			float z_min = mean_z - 3.0f * sqrt(var_z);
+			float z_max = mean_z + 3.0f * sqrt(var_z);
+			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+
+			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			{
+				float z = z_view_min + delta_z * (z_index + 0.5f);
+				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				Z[z_index] += density * alpha;
+			}
 			
 			// Keep track of last range entry to update this
 			// pixel. 
-			last_contributor = contributor;
+			// last_contributor = contributor;
 
-			float var_z = collected_cov_z[j];
-			float mean_z = collected_depth[j];
-			if (var_z < 1e-2f) {var_z = 1e-2f;}
-			if (var_z > 1.0) {var_z = 1.0;}
-			// var_z = 1.0;
-			if (var_fused < 0.0f)
-			{
-				if (first_contributor != 0){
-					printf("first_contributor: %d\n", first_contributor);
-				}
-				mean_fused = mean_z;
-				var_fused = var_z / alpha;
-				first_contributor = contributor;
-			}
-			else
-			{
-				float mean_new = mean_z;
-				float var_new = var_z / alpha;
-				float mean_old = mean_fused;
-				float var_old = var_fused;
-				float mean_diff = mean_new - mean_old;
-				mean_fused = mean_old + mean_diff * var_old / (var_old + var_new);
-				var_fused = var_old * var_new / (var_old + var_new);
-			}
+			// float var_z = collected_cov_z[j];
+			// float mean_z = collected_depth[j];
+			// if (var_z < 1e-2f) {var_z = 1e-2f;}
+			// if (var_z > 1.0) {var_z = 1.0;}
+			// // var_z = 1.0;
+			// if (var_fused < 0.0f)
+			// {
+			// 	if (first_contributor != 0){
+			// 		printf("first_contributor: %d\n", first_contributor);
+			// 	}
+			// 	mean_fused = mean_z;
+			// 	var_fused = var_z / alpha;
+			// 	first_contributor = contributor;
+			// }
+			// else
+			// {
+			// 	float mean_new = mean_z;
+			// 	float var_new = var_z / alpha;
+			// 	float mean_old = mean_fused;
+			// 	float var_old = var_fused;
+			// 	float mean_diff = mean_new - mean_old;
+			// 	mean_fused = mean_old + mean_diff * var_old / (var_old + var_new);
+			// 	var_fused = var_old * var_new / (var_old + var_new);
+			// }
 
 			// if(pix.x == 128 && pix.y == 128){
 			// 	printf("contributor: %d, alpha: %f, mean_z: %f, var_z: %f, mean_fused: %f, var_fused: %f\n", contributor, alpha, mean_z, var_z, mean_fused, var_fused);
 			// }
 
-			T = test_T;
 		}
 	}
 
@@ -436,12 +438,18 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
-		fused_mean[pix_id] = mean_fused;
-		fused_var[pix_id] = var_fused;
+		// fused_mean[pix_id] = mean_fused;
+		// fused_var[pix_id] = var_fused;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		out_z_density[pix_id] = mean_fused;
-		first_contrib[pix_id] = first_contributor;
+		// out_z_density[pix_id] = mean_fused;
+		// first_contrib[pix_id] = first_contributor;
+		for (int z_index = 0; z_index < z_index_max; z_index++){
+			atomicAdd(&out_z_density[z_index_max * (pix.y / H) + z_index], Z[z_index]);
+			// if (pix.y > 0)
+			// 	atomicAdd(&out_z_density[z_index_max * (pix.y - 1) + z_index], Z[z_index]);
+		}
+			
 
 		// if(mean_fused <= 0.0f || var_fused <= 0.0f)
 		// {
