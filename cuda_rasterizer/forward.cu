@@ -369,7 +369,8 @@ renderCUDA(
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
-	float* __restrict__ out_z_density)
+	float* __restrict__ out_z_density_h,
+	float* __restrict__ out_z_density_w)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -408,6 +409,8 @@ renderCUDA(
 	float z_view_max = 8.0;
 	float z_view_min = 0.0;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
+	// 6 * sqrt(var_z) > delta_z
+	float smallest_variance = (delta_z / 3) * (delta_z / 3);
 	float Z[z_index_max] = { 0 };
 
 	// Iterate over batches until all done or range is complete
@@ -466,8 +469,11 @@ renderCUDA(
 
 			T = test_T;
 
+			// Keep track of last range entry to update this
+			// pixel. 
+			last_contributor = contributor;
+
 			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			float mean_z = collected_depth[j];
 			float z_min = mean_z - 3.0f * sqrt(var_z);
 			float z_max = mean_z + 3.0f * sqrt(var_z);
@@ -486,14 +492,14 @@ renderCUDA(
 
 			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
 			{
+				if (var_z < smallest_variance){
+					Z[z_index] += alpha;
+					continue;
+				}
 				float z = z_view_min + delta_z * (z_index + 0.5f);
 				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
 				Z[z_index] += density * alpha;
 			}
-			
-			// Keep track of last range entry to update this
-			// pixel. 
-			last_contributor = contributor;
 		}
 	}
 
@@ -506,7 +512,13 @@ renderCUDA(
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		for (int z_index = 0; z_index < z_index_max; z_index++)
-			atomicAdd(&out_z_density[z_index], Z[z_index]);
+		{
+			if(Z[z_index] > 0.0f)
+			{
+				atomicAdd(&out_z_density_h[z_index * (H / 5) + (pix.y / 5)], Z[z_index]);
+				atomicAdd(&out_z_density_w[z_index * (W / 5) + (pix.x / 5)], Z[z_index]);
+			}
+		}
 	}
 }
 
@@ -524,7 +536,8 @@ void FORWARD::render(
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
-	float* out_z_density)
+	float* out_z_density_h,
+	float* out_z_density_w)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
@@ -539,7 +552,8 @@ void FORWARD::render(
 		n_contrib,
 		bg_color,
 		out_color,
-		out_z_density);
+		out_z_density_h,
+		out_z_density_w);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
@@ -599,43 +613,3 @@ void FORWARD::preprocess(int P, int D, int M,
 		prefiltered
 		);
 }
-
-// void FORWARD::z_density(
-// 		int P,
-// 		const float* means3D,
-// 		const glm::vec3* scales,
-// 		const float scale_modifier,
-// 		const glm::vec4* rotations,
-// 		const float* opacities,
-// 		const float* cov3D_precomp,
-// 		const float* viewmatrix,
-// 		const float* projmatrix,
-// 		const glm::vec3* cam_pos,
-// 		const float tan_fovx, float tan_fovy,
-// 		const float focal_x, float focal_y,
-// 		const int depth_res,
-// 		float* cov3Ds,
-// 		// const dim3 grid,
-// 		// uint32_t* tiles_touched,
-// 		float* out_z_density)
-// {
-// 	calcZDensityCUDA<1> << <(P + 255) / 256, 256 >> > (
-// 		P,
-// 		means3D,
-// 		scales,
-// 		scale_modifier,
-// 		rotations,
-// 		opacities,
-// 		cov3D_precomp,
-// 		viewmatrix,
-// 		projmatrix,
-// 		cam_pos,
-// 		tan_fovx, tan_fovy,
-// 		focal_x, focal_y,
-// 		depth_res,
-// 		cov3Ds,
-// 		// grid,
-// 		// tiles_touched,
-// 		out_z_density
-// 		);
-// }

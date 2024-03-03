@@ -227,23 +227,6 @@ __global__ void computeCov2DCUDA(int P,
 		dL_dc = denom2inv * (-a * a * dL_dconic.z + 2 * a * b * dL_dconic.y + (denom - a * c) * dL_dconic.x);
 		dL_db = denom2inv * 2 * (b * c * dL_dconic.x - (denom + 2 * b * b) * dL_dconic.y + a * b * dL_dconic.z);
 		
-		// Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-		// for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-		// {
-		// 	float z = z_view_min + (z_view_max - z_view_min) / z_index_max * (z_index + 0.5f);
-		// 	float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-		// 	// float A = 1.0f / sqrt(2.0f * PI * var_z);
-		// 	// float B = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-
-		// 	// float A_prime = -1.0f / (2.0f * sqrt(2.0f * PI) * pow(var_z, 1.5f));
-		// 	float B_prime = 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z) * exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-
-		// 	// float density_prime = A_prime * B + A * B_prime;
-		// 	float density_prime = B_prime;
-		// 	dL_dd += density_prime * dL_dZs[z_index];
-		// 	atomicAdd(&dL_dopacity[idx], density * dL_dZs[z_index]);
-		// }
-
 		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
 		// given gradients w.r.t. 2D covariance matrix (diagonal).
 		// cov2D = transpose(T) * transpose(Vrk) * T;
@@ -461,7 +444,8 @@ renderCUDA(
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
-	const float* __restrict__ dL_dZs,
+	const float* __restrict__ dL_dZs_h,
+	const float* __restrict__ dL_dZs_w,
 	const float* __restrict__ depth,
 	const float* __restrict__ cov_z,
 	float3* __restrict__ dL_dmean2D,
@@ -523,6 +507,12 @@ renderCUDA(
 	const float z_view_max = 8.0;
 	const float z_view_min = 0.0;
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;
+	// 6 * sqrt(var_z) > delta_z
+	float smallest_variance = (delta_z / 3) * (delta_z / 3);
+	float dL_dZ[z_index_max];
+	if (inside)
+		for (int z_index = 0; z_index < z_index_max; z_index++)
+			dL_dZ[z_index] = dL_dZs_h[z_index * (H / 5) + (pix.y / 5)] + dL_dZs_w[z_index * (W / 5) + (pix.x / 5)];
 
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -563,7 +553,6 @@ renderCUDA(
 			
 			// Get variance as before
 			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-6f) {var_z = 1e-6f;}
 			float mean_z = collected_depth[j];
 			float z_min = mean_z - 3.0f * sqrt(var_z);
 			float z_max = mean_z + 3.0f * sqrt(var_z);
@@ -651,20 +640,24 @@ renderCUDA(
 			// 	if (isinf(value)) { printf("ddensity_dvarz is inf \n");}
 			// }
 
+			float dL_dmeanz_total = 0.0f;
+			float dL_dcovz_total = 0.0f;
 			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
 			{
 				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				float density = 0;
+				if (var_z < smallest_variance) {density = 1.0f;}
+				else {density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);}
 				float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
-				atomicAdd(&dL_dcovz[global_id], d_dvarz * alpha * dL_dZs[z_index]); 
+				dL_dcovz_total += d_dvarz * alpha * dL_dZ[z_index]; 
 				float d_dmeanz = density * (z - mean_z) / var_z;
-				atomicAdd(&dL_dmeanz[global_id], d_dmeanz * alpha * dL_dZs[z_index]);
-				float value = d_dvarz * alpha * dL_dZs[z_index];
-				if (isnan(value)) { printf("ddensity_dvarz is nan \n");}
-				if (isinf(value)) { printf("ddensity_dvarz is inf \n");}
-				dL_dalpha += density * dL_dZs[z_index];
+				dL_dmeanz_total += d_dmeanz * alpha * dL_dZ[z_index];
+				dL_dalpha += density * dL_dZ[z_index];
 			}
-
+			if (isnan(dL_dcovz_total)) { printf("ddensity_dvarz is nan \n");}
+			if (isinf(dL_dcovz_total)) { printf("ddensity_dvarz is inf \n");}
+			atomicAdd(&dL_dcovz[global_id], dL_dcovz_total);
+			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_total);
 		
 			// Update gradients w.r.t. opacity of the Gaussian
 			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
@@ -753,7 +746,8 @@ void BACKWARD::render(
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
-	const float* dL_dZs,
+	const float* dL_dZs_h,
+	const float* dL_dZs_w,
 	const float* depth,
 	const float* cov_z,
 	float3* dL_dmean2D,
@@ -774,7 +768,8 @@ void BACKWARD::render(
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
-		dL_dZs,
+		dL_dZs_h,
+		dL_dZs_w,
 		depth,
 		cov_z,
 		dL_dmean2D,

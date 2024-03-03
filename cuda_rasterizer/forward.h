@@ -63,36 +63,9 @@ namespace FORWARD
 		uint32_t* n_contrib,
 		const float* bg_color,
 		float* out_color,
-		float* out_z_density);
+		float* out_z_density_h,
+		float* out_z_density_w);
 
-	// Process for z-density
-	// void z_density(
-	// 	int P,
-	// 	const float* means3D,
-	// 	const glm::vec3* scales,
-	// 	const float scale_modifier,
-	// 	const glm::vec4* rotations,
-	// 	const float* opacities,
-	// 	const float* cov3D_precomp,
-	// 	const float* viewmatrix,
-	// 	const float* projmatrix,
-	// 	const glm::vec3* cam_pos,
-	// 	const float tan_fovx, float tan_fovy,
-	// 	const float focal_x, float focal_y,
-	// 	const int depth_res,
-	// 	float* cov3Ds,
-	// 	// const dim3 grid,
-	// 	// uint32_t* tiles_touched,
-	// 	float* out_z_density);
-	
-	// void z_density_integral(
-	// 	const dim3 grid, dim3 block,
-	// 	const uint2* ranges,
-	// 	const uint32_t* point_list,
-	// 	const float* features,
-	// 	const float* cov3Ds,
-	// 	uint32_t* n_contrib,
-	// 	float* out_color);
 }
 
 

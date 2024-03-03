@@ -217,7 +217,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const float tan_fovx, float tan_fovy,
 	const bool prefiltered,
 	float* out_color,
-	float* out_z_density,
+	float* out_z_density_h,
+	float* out_z_density_w,
 	int* radii,
 	bool debug)
 {
@@ -338,28 +339,9 @@ int CudaRasterizer::Rasterizer::forward(
 		imgState.n_contrib,
 		background,
 		out_color,
-		out_z_density), debug)
-	
-	// For each res on z-density, compute the sum of Gaussians that within 3 stds
-	// of the res. This is used to compute the z-density of the scene.
-	// dim3 z_grid(1, 1, depth);
-	// dim3 z_block(1, 1, 1);
-	// CHECK_CUDA(FORWARD::z_density(
-	// 	P,
-	// 	means3D,
-	// 	(glm::vec3*)scales,
-	// 	scale_modifier,
-	// 	(glm::vec4*)rotations,
-	// 	opacities,
-	// 	cov3D_precomp,
-	// 	viewmatrix, projmatrix,
-	// 	(glm::vec3*)cam_pos,
-	// 	tan_fovx, tan_fovy,
-	// 	focal_x, focal_y,
-	// 	depth,
-	// 	geomState.cov3D,
-	// 	out_z_density), debug)
-	
+		out_z_density_h,
+		out_z_density_w), debug)
+		
 	return num_rendered;
 }
 
@@ -389,7 +371,8 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dconic,
 	float* dL_dopacity,
 	float* dL_dcolor,
-	float* dL_dZs,
+	float* dL_dZs_h,
+	float* dL_dZs_w,
 	float* dL_dcovz,
 	float* dL_dmeanz,
 	float* dL_dmean3D,
@@ -431,7 +414,8 @@ void CudaRasterizer::Rasterizer::backward(
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
-		dL_dZs,
+		dL_dZs_h,
+		dL_dZs_w,
 		geomState.depths,
 		geomState.cov_z,
 		(float3*)dL_dmean2D,

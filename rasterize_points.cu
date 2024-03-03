@@ -32,7 +32,7 @@ std::function<char*(size_t N)> resizeFunctional(torch::Tensor& t) {
     return lambda;
 }
 
-std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
+std::tuple<int, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 RasterizeGaussiansCUDA(
 	const torch::Tensor& background,
 	const torch::Tensor& means3D,
@@ -68,7 +68,8 @@ RasterizeGaussiansCUDA(
 
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
-  torch::Tensor out_z_density = torch::full({D}, 0.0, float_opts);		// Output distribution of density in dimension z (integrate fully on z)
+  torch::Tensor out_z_density_h = torch::full({D, H / 5}, 0.0, float_opts);	
+  torch::Tensor out_z_density_w = torch::full({D, W / 5}, 0.0, float_opts);
   
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
@@ -110,11 +111,12 @@ RasterizeGaussiansCUDA(
 		tan_fovy,
 		prefiltered,
 		out_color.contiguous().data<float>(),
-		out_z_density.contiguous().data<float>(),
+		out_z_density_h.contiguous().data<float>(),
+		out_z_density_w.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		debug);
   }
-  return std::make_tuple(rendered, out_color, out_z_density, radii, geomBuffer, binningBuffer, imgBuffer);
+  return std::make_tuple(rendered, out_color, out_z_density_h, out_z_density_w, radii, geomBuffer, binningBuffer, imgBuffer);
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
@@ -132,7 +134,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const float tan_fovx,
 	const float tan_fovy,
     const torch::Tensor& dL_dout_color,
-	const torch::Tensor& dL_dZs,
+	const torch::Tensor& dL_dZs_h,
+	const torch::Tensor& dL_dZs_w,
 	const torch::Tensor& sh,
 	const int degree,
 	const torch::Tensor& campos,
@@ -190,7 +193,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dconic.contiguous().data<float>(),  
 	  dL_dopacity.contiguous().data<float>(),
 	  dL_dcolors.contiguous().data<float>(),
-	  dL_dZs.contiguous().data<float>(),
+	  dL_dZs_h.contiguous().data<float>(),
+	  dL_dZs_w.contiguous().data<float>(),
 	  dL_dcovz.contiguous().data<float>(),
 	  dL_dmeanz.contiguous().data<float>(),
 	  dL_dmeans3D.contiguous().data<float>(),
