@@ -86,6 +86,7 @@ __device__ float4 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
 	float l = sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
+	// printf("l: %f\n", l);
 
 	glm::mat3 J = glm::mat3(
 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
@@ -268,88 +269,6 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// printf("forward.cu, preprocessCUDA, radii[%d]: %f\n", idx, radii[idx]);
 }
 
-// Calculate z density integral for each resolution in depth.
-// template<int C>
-// __global__ void calcZDensityCUDA(
-// 	int P,
-// 	const float*  orig_points,
-// 	const glm::vec3* scales,
-// 	const float scale_modifier,
-// 	const glm::vec4* rotations,
-// 	const float* opacities,
-// 	const float* cov3D_precomp,
-// 	const float* viewmatrix,
-// 	const float* projmatrix,
-// 	const glm::vec3* cam_pos,
-// 	const float tan_fovx, float tan_fovy,
-// 	const float focal_x, float focal_y,
-// 	const int depth_res,
-// 	float* cov3Ds,
-// 	// const dim3 grid,
-// 	// uint32_t* tiles_touched,
-// 	float* z_density)
-// {
-// 	auto idx = cg::this_grid().thread_rank();
-// 	if (idx >= P)
-// 		return;
-
-// 	// Initialize radius and touched tiles to 0. If this isn't changed,
-// 	// this Gaussian will not be processed further.
-// 	// radii[idx] = 0;
-// 	// tiles_touched[idx] = 0;
-
-// 	// Perform near culling, quit if outside.
-// 	float3 p_view;
-// 	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, false, p_view))
-// 		return;
-
-// 	// Transform point by projecting
-// 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
-// 	// float4 p_hom = transformPoint4x4(p_orig, projmatrix);
-// 	// float p_w = 1.0f / (p_hom.w + 0.0000001f);
-// 	// float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
-
-// 	// If 3D covariance matrix is precomputed, use it, otherwise compute
-// 	// from scaling and rotation parameters. 
-// 	const float* cov3D;
-// 	if (cov3D_precomp != nullptr)
-// 	{
-// 		cov3D = cov3D_precomp + idx * 6;
-// 	}
-// 	else
-// 	{
-// 		computeCov3D(scales[idx], scale_modifier, rotations[idx], cov3Ds + idx * 6);
-// 		cov3D = cov3Ds + idx * 6;
-// 	}
-
-// 	// Compute 2D screen-space covariance matrix
-// 	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
-// 	float var_z = cov.w;
-// 	float mean_z = sqrt(p_view.x * p_view.x + p_view.y * p_view.y + p_view.z * p_view.z);
-
-// 	// WARNING: why varz will be so small??
-// 	if (var_z <= 1e-6f) {
-//     	var_z = 1e-6f;
-// 	}
-
-// 	// Check if the point is in the range of 3-sigma of the z_range
-// 	int z_index_max = depth_res;
-// 	float z_min = mean_z - 3.0f * sqrt(var_z);
-// 	float z_max = mean_z;
-// 	float z_view_max = 5.0;
-// 	float z_view_min = 3.0;
-// 	float delta_z = (z_view_max - z_view_min) / z_index_max;
-// 	int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-// 	int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-
-// 	for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-// 	{
-// 		float z = z_view_min + delta_z * (z_index + 0.5f);
-// 		float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-// 		atomicAdd(&z_density[z_index], density * opacities[idx]);
-// 	}
-// }
-
 
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
@@ -480,16 +399,6 @@ renderCUDA(
 			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
-			// for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
-			// {
-			// 	float z_front = z_view_min + delta_z * (z_index + 0.001f);
-			// 	float z_back = z_view_min + delta_z * (z_index + 0.999f);
-			// 	float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
-			// 	float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
-			// 	float density = max(0.0f, density_back - density_front);
-			// 	Z[z_index] += density * alpha;
-			// }
-
 			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
 			{
 				if (var_z < smallest_variance){
@@ -515,8 +424,8 @@ renderCUDA(
 		{
 			if(Z[z_index] > 0.0f)
 			{
-				atomicAdd(&out_z_density_h[z_index * (H / 5) + (pix.y / 5)], Z[z_index]);
-				atomicAdd(&out_z_density_w[z_index * (W / 5) + (pix.x / 5)], Z[z_index]);
+				atomicAdd(&out_z_density_h[z_index * H + pix.y], Z[z_index]);
+				atomicAdd(&out_z_density_w[z_index * W + pix.x], Z[z_index]);
 			}
 		}
 	}

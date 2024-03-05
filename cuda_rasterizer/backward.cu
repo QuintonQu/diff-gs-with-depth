@@ -509,11 +509,13 @@ renderCUDA(
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 3) * (delta_z / 3);
-	float dL_dZ[z_index_max];
-	if (inside)
-		for (int z_index = 0; z_index < z_index_max; z_index++)
-			dL_dZ[z_index] = dL_dZs_h[z_index * (H / 5) + (pix.y / 5)] + dL_dZs_w[z_index * (W / 5) + (pix.x / 5)];
-
+	float dL_dZ[z_index_max] = {0};
+	if (inside){
+		for (int z_index = 0; z_index < z_index_max; z_index++){
+			dL_dZ[z_index] = dL_dZs_h[z_index * H + pix.y] + dL_dZs_w[z_index * W + pix.x];
+		}
+	}
+			
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
@@ -615,31 +617,6 @@ renderCUDA(
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
 
 			// Update Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-			// for(int z_index = z_min_index; z_index <= z_max_index; z_index++)
-			// {
-			// 	float z_front = z_view_min + delta_z * (z_index + 0.001f);
-			// 	float z_back = z_view_min + delta_z * (z_index + 0.999f);
-			// 	float density_front = exp(-0.5f * (z_front - mean_z) * (z_front - mean_z) / var_z);
-			// 	float density_back = exp(-0.5f * (z_back - mean_z) * (z_back - mean_z) / var_z);
-			// 	float density = max(0.0f, density_back - density_front);
-
-			// 	float ddensity_front_dvarz = density_front * 0.5f * (z_front - mean_z) * (z_front - mean_z) / (var_z * var_z);
-			// 	float ddensity_back_dvarz = density_back * 0.5f * (z_back - mean_z) * (z_back - mean_z) / (var_z * var_z);
-			// 	ddensity_back_dvarz = max(0.0f, ddensity_back_dvarz);
-			// 	float ddensity_dvarz = ddensity_back_dvarz - ddensity_front_dvarz;
-			// 	float value = ddensity_dvarz * alpha * dL_dZs[z_index];
-			// 	atomicAdd(&dL_dcovz[global_id], value); 
-			// 	dL_dalpha += density * dL_dZs[z_index];
-
-			// 	float ddensity_front_dmeanz = density_front * (z_front - mean_z) / var_z;
-			// 	float ddensity_back_dmeanz = density_back * (z_back - mean_z) / var_z;
-			// 	float ddensity_dmeanz = ddensity_back_dmeanz - ddensity_front_dmeanz;
-			// 	atomicAdd(&dL_dmeanz[global_id], ddensity_dmeanz * alpha * dL_dZs[z_index]);
-
-			// 	if (isnan(value)) { printf("ddensity_dvarz is nan \n");}
-			// 	if (isinf(value)) { printf("ddensity_dvarz is inf \n");}
-			// }
-
 			float dL_dmeanz_total = 0.0f;
 			float dL_dcovz_total = 0.0f;
 			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
@@ -654,8 +631,6 @@ renderCUDA(
 				dL_dmeanz_total += d_dmeanz * alpha * dL_dZ[z_index];
 				dL_dalpha += density * dL_dZ[z_index];
 			}
-			if (isnan(dL_dcovz_total)) { printf("ddensity_dvarz is nan \n");}
-			if (isinf(dL_dcovz_total)) { printf("ddensity_dvarz is inf \n");}
 			atomicAdd(&dL_dcovz[global_id], dL_dcovz_total);
 			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_total);
 		
