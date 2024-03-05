@@ -442,6 +442,7 @@ renderCUDA(
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
 	const float* __restrict__ final_Ts,
+	const float* __restrict__ final_Ds,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
 	const float* __restrict__ dL_dZs_h,
@@ -482,6 +483,8 @@ renderCUDA(
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
 	const float T_final = inside ? final_Ts[pix_id] : 0;
+	const float D_final = inside ? final_Ds[pix_id] : 0;
+	float accum_d = D_final;
 	float T = T_final;
 
 	// We start from the back. The ID of the last contributing
@@ -497,24 +500,14 @@ renderCUDA(
 
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
+	float last_d = 0;
 
 	// Gradient of pixel coordinate w.r.t. normalized 
 	// screen-space viewport corrdinates (-1 to 1)
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	const int z_index_max = 200;
-	const float z_view_max = 8.0;
-	const float z_view_min = 0.0;
-	const float delta_z = (z_view_max - z_view_min) / z_index_max;
-	// 6 * sqrt(var_z) > delta_z
-	float smallest_variance = (delta_z / 3) * (delta_z / 3);
-	float dL_dZ[z_index_max] = {0};
-	if (inside){
-		for (int z_index = 0; z_index < z_index_max; z_index++){
-			dL_dZ[z_index] = dL_dZs_h[z_index * H + pix.y] + dL_dZs_w[z_index * W + pix.x];
-		}
-	}
+	float dL_dD = inside ? dL_dZs_h[pix_id] : 0; 
 			
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -553,14 +546,6 @@ renderCUDA(
 			if (power > 0.0f)
 				continue;
 			
-			// Get variance as before
-			float var_z = collected_cov_z[j];
-			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
-			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-
 			const float G = exp(power);
 			const float alpha = min(0.99f, con_o.w * G);
 			if (alpha < 1.0f / 255.0f)
@@ -588,6 +573,12 @@ renderCUDA(
 				// many that were affected by this Gaussian.
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
+
+			const float depth = collected_depth[j];
+			accum_d = last_alpha * last_d + (1.f - last_alpha) * accum_d;
+			last_d = depth;
+			dL_dalpha += (depth - accum_d) * dL_dD;
+
 			dL_dalpha *= T;
 			// Update last alpha (to be used in the next iteration)
 			last_alpha = alpha;
@@ -615,24 +606,6 @@ renderCUDA(
 			atomicAdd(&dL_dconic2D[global_id].x, -0.5f * gdx * d.x * dL_dG);
 			atomicAdd(&dL_dconic2D[global_id].y, -0.5f * gdx * d.y * dL_dG);
 			atomicAdd(&dL_dconic2D[global_id].w, -0.5f * gdy * d.y * dL_dG);
-
-			// Update Gradients of loss w.r.t. 2D covariance matrix but cov2D[2][2].
-			float dL_dmeanz_total = 0.0f;
-			float dL_dcovz_total = 0.0f;
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-			{
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = 0;
-				if (var_z < smallest_variance) {density = 1.0f;}
-				else {density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);}
-				float d_dvarz = density * 0.5f * (z - mean_z) * (z - mean_z) / (var_z * var_z);
-				dL_dcovz_total += d_dvarz * alpha * dL_dZ[z_index]; 
-				float d_dmeanz = density * (z - mean_z) / var_z;
-				dL_dmeanz_total += d_dmeanz * alpha * dL_dZ[z_index];
-				dL_dalpha += density * dL_dZ[z_index];
-			}
-			atomicAdd(&dL_dcovz[global_id], dL_dcovz_total);
-			atomicAdd(&dL_dmeanz[global_id], dL_dmeanz_total);
 		
 			// Update gradients w.r.t. opacity of the Gaussian
 			atomicAdd(&(dL_dopacity[global_id]), G * dL_dalpha);
@@ -719,6 +692,7 @@ void BACKWARD::render(
 	const float4* conic_opacity,
 	const float* colors,
 	const float* final_Ts,
+	const float* final_Ds,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
 	const float* dL_dZs_h,
@@ -741,6 +715,7 @@ void BACKWARD::render(
 		conic_opacity,
 		colors,
 		final_Ts,
+		final_Ds,
 		n_contrib,
 		dL_dpixels,
 		dL_dZs_h,

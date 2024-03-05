@@ -60,6 +60,7 @@ namespace FORWARD
 		const float* cov_z,
 		const float* depth,
 		float* final_T,
+		float* final_D,
 		uint32_t* n_contrib,
 		const float* bg_color,
 		float* out_color,

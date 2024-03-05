@@ -30,6 +30,7 @@ namespace BACKWARD
 		const float4* conic_opacity,
 		const float* colors,
 		const float* final_Ts,
+		const float* final_Ds,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
 		const float* dL_dZs_h,

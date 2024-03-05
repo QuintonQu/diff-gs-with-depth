@@ -285,6 +285,7 @@ renderCUDA(
 	const float* __restrict__ cov_z,
 	const float* __restrict__ depth,
 	float* __restrict__ final_T,
+	float* __restrict__ final_D,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
@@ -322,6 +323,7 @@ renderCUDA(
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
+	float D = 0;
 
 	// Initialize z info
 	const int z_index_max = 200;
@@ -386,29 +388,14 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
+			D += collected_depth[j] * alpha *T;
+
 			T = test_T;
 
 			// Keep track of last range entry to update this
 			// pixel. 
 			last_contributor = contributor;
 
-			float var_z = collected_cov_z[j];
-			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
-			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-			{
-				if (var_z < smallest_variance){
-					Z[z_index] += alpha;
-					continue;
-				}
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-				Z[z_index] += density * alpha;
-			}
 		}
 	}
 
@@ -420,14 +407,8 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		for (int z_index = 0; z_index < z_index_max; z_index++)
-		{
-			if(Z[z_index] > 0.0f)
-			{
-				atomicAdd(&out_z_density_h[z_index * H + pix.y], Z[z_index]);
-				atomicAdd(&out_z_density_w[z_index * W + pix.x], Z[z_index]);
-			}
-		}
+		out_z_density_h[pix_id] = D;
+		final_D[pix_id] = D;
 	}
 }
 
@@ -442,6 +423,7 @@ void FORWARD::render(
 	const float* cov_z,
 	const float* depth,
 	float* final_T,
+	float* final_D,
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
@@ -458,6 +440,7 @@ void FORWARD::render(
 		cov_z,
 		depth,
 		final_T,
+		final_D,
 		n_contrib,
 		bg_color,
 		out_color,
