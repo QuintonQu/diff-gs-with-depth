@@ -71,7 +71,7 @@ __device__ glm::vec3 computeColorFromSH(int idx, int deg, int max_coeffs, const 
 }
 
 // Forward version of 2D covariance matrix computation
-__device__ float4 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
+__device__ glm::mat3 computeCov2D(const float3& mean, float focal_x, float focal_y, float tan_fovx, float tan_fovy, const float* cov3D, const float* viewmatrix)
 {
 	// The following models the steps outlined by equations 29
 	// and 31 in "EWA Splatting" (Zwicker et al., 2002). 
@@ -111,7 +111,7 @@ __device__ float4 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	cov[0][0] += 0.3f;
 	cov[1][1] += 0.3f;
 
-	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]), float(cov[2][2]) };
+	return cov;
 }
 
 // Forward method for converting scale and rotation properties of each
@@ -177,7 +177,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
-	float* cov_z,
+	float3* conic_cef,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered)
@@ -216,21 +216,37 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	}
 
 	// Compute 2D screen-space covariance matrix
-	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	glm::mat3 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
+	float a = cov[0][0];
+	float b = cov[0][1];
+	float c = cov[0][2];
+	float d = cov[1][1];
+	float e = cov[1][2];
+	float f = cov[2][2];
 
 	// Invert covariance (EWA algorithm)
-	// 这里真的只是在求矩阵的逆，只是对于协方差矩阵可以用这种方法
-	float det = (cov.x * cov.z - cov.y * cov.y);
+	// For the 2D Gaussian splatting on the xv (RGB) plane [[a, b], [b, d]]
+	float det = (a * d - b * b);
 	if (det == 0.0f)
 		return;
 	float det_inv = 1.f / det;
-	float3 conic = { cov.z * det_inv, -cov.y * det_inv, cov.x * det_inv };
+	float3 conic = { d * det_inv, -b * det_inv, a * det_inv };
+
+	// Invert covariance for 3D covariance matrix (use glm inline method)
+	// TODO: Can be changed to manual inversion if performance is an issue, or some problem in the backward.
+	// glm::mat3 cov_inv = glm::inverse(cov);
+	float det_full = glm::determinant(cov);
+	if (det_full == 0.0f)
+		return;
+	float conic_c = (b * e - c * d) / det_full;
+	float conic_e = (c * b - a * e) / det_full;
+	float conic_f = (a * d - b * b) / det_full; 
 
 	// Compute extent in screen space (by finding eigenvalues of
 	// 2D covariance matrix). Use extent to compute a bounding rectangle
 	// of screen-space tiles that this Gaussian overlaps with. Quit if
 	// rectangle covers 0 tiles. 
-	float mid = 0.5f * (cov.x + cov.z);
+	float mid = 0.5f * (a + d);
 	float lambda1 = mid + sqrt(max(0.1f, mid * mid - det));
 	float lambda2 = mid - sqrt(max(0.1f, mid * mid - det));
 	float my_radius = ceil(3.f * sqrt(max(lambda1, lambda2)));
@@ -256,7 +272,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	points_xy_image[idx] = point_image;
 	// Inverse 2D covariance and opacity neatly pack into one float4
 	conic_opacity[idx] = { conic.x, conic.y, conic.z, opacities[idx] };
-	cov_z[idx] = cov.w;
+	conic_cef[idx] = { conic_c, conic_e, conic_f };
 	tiles_touched[idx] = (rect_max.y - rect_min.y) * (rect_max.x - rect_min.x);
 }
 
@@ -272,7 +288,7 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
 	const float4* __restrict__ conic_opacity,
-	const float* __restrict__ cov_z,
+	const float3* __restrict__ conic_cef,
 	const float* __restrict__ depth,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
@@ -306,7 +322,7 @@ renderCUDA(
 	__shared__ int collected_id[BLOCK_SIZE];
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
-	__shared__ float collected_cov_z[BLOCK_SIZE];
+	__shared__ float3 collected_conic_cef[BLOCK_SIZE];
 	__shared__ float collected_depth[BLOCK_SIZE];
 
 	// Initialize helper variables
@@ -317,13 +333,7 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	const int z_index_max = 200;
-	float z_view_max = 8.0;
-	float z_view_min = 0.0;
-	float delta_z = (z_view_max - z_view_min) / z_index_max;
-	float Z[z_index_max] = { 0 };
-	// float var_fused = -1.0f;
-	// float mean_fused = 0.0f;
+	float mean_fused = 0.0f;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -341,7 +351,7 @@ renderCUDA(
 			collected_id[block.thread_rank()] = coll_id;
 			collected_xy[block.thread_rank()] = points_xy_image[coll_id];
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
-			collected_cov_z[block.thread_rank()] = cov_z[coll_id];
+			collected_conic_cef[block.thread_rank()] = conic_cef[coll_id];
 			collected_depth[block.thread_rank()] = depth[coll_id];
 		}
 		block.sync();
@@ -379,56 +389,24 @@ renderCUDA(
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
 
+			// Weighted average of depth
+			float inv_cov_c = collected_conic_cef[j].x;
+			float inv_cov_e = collected_conic_cef[j].y;
+			float inv_cov_f = collected_conic_cef[j].z;
+			float z = collected_depth[j];
+			float z_revised = z - (inv_cov_c * d.x + inv_cov_e * d.y) / inv_cov_f;
+			mean_fused += z_revised * alpha * T;
+			if (z - z_revised > 1.0f)
+				printf("z - z_revised: %f\n", z - z_revised);
+
 			T = test_T;
-
-			float var_z = collected_cov_z[j];
-			if (var_z <= 1e-6f) {var_z = 1e-6f;}
-			float mean_z = collected_depth[j];
-			float z_min = mean_z - 3.0f * sqrt(var_z);
-			float z_max = mean_z + 3.0f * sqrt(var_z);
-			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-
-			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
-			{
-				float z = z_view_min + delta_z * (z_index + 0.5f);
-				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
-				Z[z_index] += density * alpha;
-			}
 			
 			// Keep track of last range entry to update this
 			// pixel. 
-			// last_contributor = contributor;
+			last_contributor = contributor;
 
-			// float var_z = collected_cov_z[j];
-			// float mean_z = collected_depth[j];
-			// if (var_z < 1e-2f) {var_z = 1e-2f;}
-			// if (var_z > 1.0) {var_z = 1.0;}
-			// // var_z = 1.0;
-			// if (var_fused < 0.0f)
-			// {
-			// 	if (first_contributor != 0){
-			// 		printf("first_contributor: %d\n", first_contributor);
-			// 	}
-			// 	mean_fused = mean_z;
-			// 	var_fused = var_z / alpha;
-			// 	first_contributor = contributor;
-			// }
-			// else
-			// {
-			// 	float mean_new = mean_z;
-			// 	float var_new = var_z / alpha;
-			// 	float mean_old = mean_fused;
-			// 	float var_old = var_fused;
-			// 	float mean_diff = mean_new - mean_old;
-			// 	mean_fused = mean_old + mean_diff * var_old / (var_old + var_new);
-			// 	var_fused = var_old * var_new / (var_old + var_new);
-			// }
-
-			// if(pix.x == 128 && pix.y == 128){
-			// 	printf("contributor: %d, alpha: %f, mean_z: %f, var_z: %f, mean_fused: %f, var_fused: %f\n", contributor, alpha, mean_z, var_z, mean_fused, var_fused);
-			// }
-
+			if (first_contributor == 0)
+				first_contributor = contributor;
 		}
 	}
 
@@ -438,24 +416,13 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
-		// fused_mean[pix_id] = mean_fused;
-		// fused_var[pix_id] = var_fused;
+		fused_mean[pix_id] = mean_fused;
+		
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		// out_z_density[pix_id] = mean_fused;
-		// first_contrib[pix_id] = first_contributor;
-		for (int z_index = 0; z_index < z_index_max; z_index++){
-			atomicAdd(&out_z_density[z_index_max * (pix.y / H) + z_index], Z[z_index]);
-			// if (pix.y > 0)
-			// 	atomicAdd(&out_z_density[z_index_max * (pix.y - 1) + z_index], Z[z_index]);
-		}
-			
-
-		// if(mean_fused <= 0.0f || var_fused <= 0.0f)
-		// {
-		// 	out_z_density[pix_id] = 0.0f;
-		// 	printf("mean_fused: %f, var_fused: %f\n", mean_fused, var_fused);
-		// }
+		out_z_density[pix_id] = mean_fused;
+		
+		first_contrib[pix_id] = first_contributor;
 	}
 }
 
@@ -467,7 +434,7 @@ void FORWARD::render(
 	const float2* means2D,
 	const float* colors,
 	const float4* conic_opacity,
-	const float* cov_z,
+	const float3* conic_cef,
 	const float* depth,
 	float* final_T,
 	uint32_t* n_contrib,
@@ -485,7 +452,7 @@ void FORWARD::render(
 		means2D,
 		colors,
 		conic_opacity,
-		cov_z,
+		conic_cef,
 		depth,
 		final_T,
 		n_contrib,
@@ -519,7 +486,7 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* cov3Ds,
 	float* rgb,
 	float4* conic_opacity,
-	float* cov_z,
+	float3* conic_cef,
 	const dim3 grid,
 	uint32_t* tiles_touched,
 	bool prefiltered
@@ -548,7 +515,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		cov3Ds,
 		rgb,
 		conic_opacity,
-		cov_z,
+		conic_cef,
 		grid,
 		tiles_touched,
 		prefiltered
