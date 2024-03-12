@@ -210,8 +210,8 @@ __global__ void computeCov2DCUDA(int P,
 	float dL_da = 0, dL_db = 0, dL_dd = 0;
 	float denom2inv = 1.0f / ((denom * denom) + 0.0000001f);
 
-	// float det_full = glm::determinant(cov2D);
-	float det_full = a * d * f + 2 * b * c * e - a * e * e - d * c * c - f * b * b;
+	float det_full = glm::determinant(cov2D);
+	// float det_full = a * d * f + 2 * b * c * e - a * e * e - d * c * c - f * b * b;
 	float dL_dc = 0, dL_de = 0, dL_df = 0;
 	float det_full_inv2 = 1.0f / ((det_full * det_full) + 0.0000001f);
 	float det_c = (b * e - c * d);
@@ -219,7 +219,7 @@ __global__ void computeCov2DCUDA(int P,
 	float det_f = (a * d - b * b); 
 	float det_a = (d * f - e * e);
 	float det_d = (a * f - c * c);
-	float det_b = (b * f - c * e);
+	float det_b = (c * e - b * f);
 
 	if (denom2inv != 0)
 	{
@@ -232,23 +232,25 @@ __global__ void computeCov2DCUDA(int P,
 
 		// Gradient of loss w.r.t. entries of 3D covariance matrix,
 		// given gradients of loss w.r.t. 3D covariance inverse matrix.
-		dL_da += det_full_inv2 * det_c * det_a * dL_dconic_cef.x;
-		dL_da += det_full_inv2 * (-e * det_full - det_e * det_a) * dL_dconic_cef.y;
-		dL_da += det_full_inv2 * ( d * det_full - det_f * det_a) * dL_dconic_cef.z;
-		dL_db += det_full_inv2 * ( e * det_full - det_c * (-2 * det_b)) * dL_dconic_cef.x;
-		dL_db += det_full_inv2 * ( c * det_full - det_e * (-2 * det_b)) * dL_dconic_cef.y;
-		dL_db += det_full_inv2 * (-2 * b * det_full - det_f * (-2 * det_b)) * dL_dconic_cef.z;
-		dL_dc += det_full_inv2 * (-d * det_full - det_c * 2 * det_c) * dL_dconic_cef.x;
-		dL_dc += det_full_inv2 * ( b * det_full - det_e * 2 * det_c) * dL_dconic_cef.y;
-		dL_dc += det_full_inv2 * (-det_f * 2 * det_c) * dL_dconic_cef.z;
+		dL_da += det_full_inv2 * (-det_c * det_a) * dL_dconic_cef.x;
+		dL_db += det_full_inv2 * ( e * det_full - det_c * det_b * 2) * dL_dconic_cef.x;
+		dL_dc += det_full_inv2 * (-d * det_full - det_c * det_c * 2) * dL_dconic_cef.x;
 		dL_dd += det_full_inv2 * (-c * det_full - det_c * det_d) * dL_dconic_cef.x;
-		dL_dd += det_full_inv2 * (-det_e * det_d) * dL_dconic_cef.y;
-		dL_dd += det_full_inv2 * ( a * det_full - det_f * det_d) * dL_dconic_cef.z;
 		dL_de += det_full_inv2 * ( b * det_full - det_c * det_e * 2) * dL_dconic_cef.x;
-		dL_de += det_full_inv2 * (-a * det_full - det_e * det_e * 2) * dL_dconic_cef.y;
-		dL_de += det_full_inv2 * (det_f * det_e * 2) * dL_dconic_cef.z;
 		dL_df += det_full_inv2 * (-det_c * det_f) * dL_dconic_cef.x;
+
+		dL_da += det_full_inv2 * (-e * det_full - det_e * det_a) * dL_dconic_cef.y;
+		dL_db += det_full_inv2 * ( c * det_full - det_e * det_b * 2) * dL_dconic_cef.y;
+		dL_dc += det_full_inv2 * ( b * det_full - det_e * det_c * 2) * dL_dconic_cef.y;
+		dL_dd += det_full_inv2 * (-det_e * det_d) * dL_dconic_cef.y;
+		dL_de += det_full_inv2 * (-a * det_full - det_e * det_e * 2) * dL_dconic_cef.y;
 		dL_df += det_full_inv2 * (-det_e * det_f) * dL_dconic_cef.y;
+
+		dL_da += det_full_inv2 * ( d * det_full - det_f * det_a) * dL_dconic_cef.z;
+		dL_db += det_full_inv2 * (-2 * b * det_full - det_f * det_b * 2) * dL_dconic_cef.z;
+		dL_dc += det_full_inv2 * (-det_f * det_c * 2) * dL_dconic_cef.z;
+		dL_dd += det_full_inv2 * ( a * det_full - det_f * det_d) * dL_dconic_cef.z;
+		dL_de += det_full_inv2 * (-det_f * det_e * 2) * dL_dconic_cef.z;
 		dL_df += det_full_inv2 * (-det_f * det_f) * dL_dconic_cef.z;
 
 		// Gradients of loss L w.r.t. each 3D covariance matrix (Vrk) entry, 
@@ -520,7 +522,9 @@ renderCUDA(
 	// In the forward, we stored the final value for T, the
 	// product of all (1 - alpha) factors. 
 	const float T_final = inside ? final_Ts[pix_id] : 0;
+	const float D_final = inside ? fused_mean[pix_id] : 0;
 	float T = T_final;
+	float accum_d = D_final;
 
 	// We start from the back. The ID of the last contributing
 	// Gaussian is known from each pixel from the forward.
@@ -542,7 +546,7 @@ renderCUDA(
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	float last_fused_mean = inside ? fused_mean[pix_id] : 0;
+	float last_d = 0;
 	float dL_dz = inside ? dL_dZs[pix_id] : 0;
 
 	// Traverse all Gaussians
@@ -610,7 +614,6 @@ renderCUDA(
 				atomicAdd(&(dL_dcolors[global_id * C + ch]), dchannel_dcolor * dL_dchannel);
 			}
 			
-
 			// Propagate gradient to per-Gaussian depth
 			const float dL_dzrevised = dL_dz * alpha * T;
 			const float inv_cov_c = collected_conic_cef[j].x;
@@ -618,18 +621,19 @@ renderCUDA(
 			const float inv_cov_f = collected_conic_cef[j].z;
 			const float z = collected_depth[j];
 			const float z_revised = z - (inv_cov_c * d.x + inv_cov_e * d.y) / inv_cov_f;
-			// atomicAdd(&dL_dconic_cef[global_id].x, -dL_dzrevised * d.x / inv_cov_f);
-			// atomicAdd(&dL_dconic_cef[global_id].y, -dL_dzrevised * d.y / inv_cov_f);
-			// atomicAdd(&dL_dconic_cef[global_id].z, dL_dzrevised * (inv_cov_c * d.x + inv_cov_e * d.y) / (inv_cov_f * inv_cov_f));
-			// atomicAdd(&dL_dmeanz[global_id], dL_dzrevised);
-			dL_dalpha += z_revised * dL_dz;
+			atomicAdd(&dL_dconic_cef[global_id].x, -dL_dzrevised * d.x / inv_cov_f);
+			atomicAdd(&dL_dconic_cef[global_id].y, -dL_dzrevised * d.y / inv_cov_f);
+			atomicAdd(&dL_dconic_cef[global_id].z, dL_dzrevised * (inv_cov_c * d.x + inv_cov_e * d.y) / (inv_cov_f * inv_cov_f));
+			atomicAdd(&dL_dmeanz[global_id], dL_dzrevised);
+
+			accum_d = last_alpha * last_d + (1.f - last_alpha) * accum_d;
+			last_d = z_revised;
+			dL_dalpha += (z_revised - accum_d) * dL_dz;
 
 			dL_dalpha *= T;
 
 			// Update last alpha (to be used in the next iteration)s
 			last_alpha = alpha;
-			// last_fused_mean -= z_revised * alpha * T;
-			// if (last_fused_mean < 0) {printf("Negative fused mean\n");}
 
 			// Account for fact that alpha also influences how much of
 			// the background color is added if nothing left to blend

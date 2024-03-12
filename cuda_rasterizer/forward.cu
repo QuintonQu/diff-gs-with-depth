@@ -396,8 +396,6 @@ renderCUDA(
 			float z = collected_depth[j];
 			float z_revised = z - (inv_cov_c * d.x + inv_cov_e * d.y) / inv_cov_f;
 			mean_fused += z_revised * alpha * T;
-			if (z - z_revised > 1.0f)
-				printf("z - z_revised: %f\n", z - z_revised);
 
 			T = test_T;
 			
