@@ -547,8 +547,8 @@ renderCUDA(
 
 	// Gradient of z-density histogram
 	const int z_index_max = 200;
-	const float z_view_max = 16.0;
-	const float z_view_min = 13.0;
+	const float z_view_max = 8.0;
+	const float z_view_min = 0.0;
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 6) * (delta_z / 6);
