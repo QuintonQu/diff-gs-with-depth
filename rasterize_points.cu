@@ -52,25 +52,28 @@ RasterizeGaussiansCUDA(
 	const int degree,
 	const torch::Tensor& campos,
 	const bool prefiltered,
-	const bool debug)
+	const bool debug,
+	const bool is_sonar)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
   }
-  
+
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
-  const int D = 200;		// This is the resolution of the depth (default 200)
+  const int D = 512;		// This is the resolution of the depth (default 200)
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
 
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor radii = torch::full({P}, 0, means3D.options().dtype(torch::kInt32));
-  torch::Tensor out_z_density_h = torch::full({D, H / 5}, 0.0, float_opts);	
-  torch::Tensor out_z_density_w = torch::full({D, W / 5}, 0.0, float_opts);
-  
+//   torch::Tensor out_z_density_h = torch::full({D, H / 5}, 0.0, float_opts);	
+//   torch::Tensor out_z_density_w = torch::full({D, W / 5}, 0.0, float_opts);
+  torch::Tensor out_z_density_h = torch::full({D, 1}, 0.0, float_opts);	
+  torch::Tensor out_z_density_w = torch::full({D, 1}, 0.0, float_opts);
+
   torch::Device device(torch::kCUDA);
   torch::TensorOptions options(torch::kByte);
   torch::Tensor geomBuffer = torch::empty({0}, options.device(device));
@@ -110,6 +113,7 @@ RasterizeGaussiansCUDA(
 		tan_fovx,
 		tan_fovy,
 		prefiltered,
+		is_sonar,
 		out_color.contiguous().data<float>(),
 		out_z_density_h.contiguous().data<float>(),
 		out_z_density_w.contiguous().data<float>(),

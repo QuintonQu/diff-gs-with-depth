@@ -85,8 +85,9 @@ __device__ float4 computeCov2D(const float3& mean, float focal_x, float focal_y,
 	const float tytz = t.y / t.z;
 	t.x = min(limx, max(-limx, txtz)) * t.z;
 	t.y = min(limy, max(-limy, tytz)) * t.z;
-	float l = sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
-
+	float l = sqrt(t.x * t.x + t.y * t.y + t.z * t.z);	
+	//printf("%.3f\n", l);
+	
 	glm::mat3 J = glm::mat3(
 		focal_x / t.z, 0.0f, -(focal_x * t.x) / (t.z * t.z),
 		0.0f, focal_y / t.z, -(focal_y * t.y) / (t.z * t.z),
@@ -180,12 +181,13 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	bool is_sonar)
 {
 	auto idx = cg::this_grid().thread_rank();
-	if (idx >= P)
+	if (idx >= P) {
 		return;
-
+	}
 	// Initialize radius and touched tiles to 0. If this isn't changed,
 	// this Gaussian will not be processed further.
 	radii[idx] = 0;
@@ -193,15 +195,25 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
-		// printf("forward.cu, preprocessCUDA, not in frustum\n");
-		return;
-	}
 	
+	if(is_sonar) {
+		if (!in_sonar_frustrum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+			// printf("forward.cu, preprocessCUDA, not in frustum\n");
+			return;
+		}
+	}
+	else {
+		if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+			// printf("forward.cu, preprocessCUDA, not in frustum\n");
+			return;
+		}
+	}
 	// Transform point by projecting
 	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
 	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
 	float p_w = 1.0f / (p_hom.w + 0.0000001f);
+	
+	// 3D point in camera frame
 	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
 
 	// If 3D covariance matrix is precomputed, use it, otherwise compute
@@ -220,6 +232,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	// printf("forward.cu, preprocessCUDA, cov3D: %f, %f, %f, %f, %f, %f\n", cov3D[0], cov3D[1], cov3D[2], cov3D[3], cov3D[4], cov3D[5]);
 
 	// Compute 2D screen-space covariance matrix
+	//printf("before computeCov2D\n");
 	float4 cov = computeCov2D(p_orig, focal_x, focal_y, tan_fovx, tan_fovy, cov3D, viewmatrix);
 
 	// Invert covariance (EWA algorithm)
@@ -248,6 +261,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// If colors have been precomputed, use them, otherwise convert
 	// spherical harmonics coefficients to RGB color.
+
 	if (colors_precomp == nullptr)
 	{
 		glm::vec3 result = computeColorFromSH(idx, D, M, (glm::vec3*)orig_points, *cam_pos, shs, clamped);
@@ -405,9 +419,9 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	const int z_index_max = 200;
-	float z_view_max = 8.0;
-	float z_view_min = 0.0;
+	const int z_index_max = 30;
+	float z_view_max = 3.0;
+	float z_view_min = 0.75;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 3) * (delta_z / 3);
@@ -515,8 +529,10 @@ renderCUDA(
 		{
 			if(Z[z_index] > 0.0f)
 			{
-				atomicAdd(&out_z_density_h[z_index * (H / 5) + (pix.y / 5)], Z[z_index]);
-				atomicAdd(&out_z_density_w[z_index * (W / 5) + (pix.x / 5)], Z[z_index]);
+				// atomicAdd(&out_z_density_h[z_index * (H / 5) + (pix.y / 5)], Z[z_index]);
+				// atomicAdd(&out_z_density_w[z_index * (W / 5) + (pix.x / 5)], Z[z_index]);
+				atomicAdd(&out_z_density_h[z_index], Z[z_index]);
+				//atomicAdd(&out_z_density_w[z_index], Z[z_index]);
 			}
 		}
 	}
@@ -581,8 +597,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered
-	)
+	bool prefiltered,
+	bool is_sonar)
 {
 	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
 		P, D, M,
@@ -610,6 +626,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		cov_z,
 		grid,
 		tiles_touched,
-		prefiltered
+		prefiltered,
+		is_sonar
 		);
 }
