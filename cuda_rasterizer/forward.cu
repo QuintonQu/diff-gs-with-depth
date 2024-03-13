@@ -335,11 +335,11 @@ renderCUDA(
 	// Initialize z info
 	// float mean_fused = 0.0f;
 	const int z_index_max = 200;
-	float z_view_max = 8.0;
-	float z_view_min = 0.0;
+	float z_view_max = 16.0;
+	float z_view_min = 13.0;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
-	float smallest_variance = (delta_z / 3) * (delta_z / 3);
+	float smallest_variance = (delta_z / 6) * (delta_z / 6);
 	float Z[z_index_max] = { 0 };
 
 	// Iterate over batches until all done or range is complete
@@ -392,15 +392,6 @@ renderCUDA(
 				continue;
 			}
 
-			T = test_T;
-			
-			// Keep track of last range entry to update this
-			// pixel. 
-			last_contributor = contributor;
-
-			if (first_contributor == 0)
-				first_contributor = contributor;
-
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
@@ -423,12 +414,22 @@ renderCUDA(
 			{
 				if (var_z < smallest_variance){
 					Z[z_index] += alpha;
+					printf("Smallest variance\n");
 					continue;
 				}
 				float z = z_view_min + delta_z * (z_index + 0.5f);
 				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
 				Z[z_index] += density * alpha;
 			}
+
+			T = test_T;
+			
+			// Keep track of last range entry to update this
+			// pixel. 
+			last_contributor = contributor;
+
+			if (first_contributor == 0)
+				first_contributor = contributor;
 		}
 	}
 
