@@ -333,7 +333,14 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	float mean_fused = 0.0f;
+	// float mean_fused = 0.0f;
+	const int z_index_max = 200;
+	float z_view_max = 8.0;
+	float z_view_min = 0.0;
+	float delta_z = (z_view_max - z_view_min) / z_index_max;
+	// 6 * sqrt(var_z) > delta_z
+	float smallest_variance = (delta_z / 3) * (delta_z / 3);
+	float Z[z_index_max] = { 0 };
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -385,6 +392,15 @@ renderCUDA(
 				continue;
 			}
 
+			T = test_T;
+			
+			// Keep track of last range entry to update this
+			// pixel. 
+			last_contributor = contributor;
+
+			if (first_contributor == 0)
+				first_contributor = contributor;
+
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
@@ -395,16 +411,24 @@ renderCUDA(
 			float inv_cov_f = collected_conic_cef[j].z;
 			float z = collected_depth[j];
 			float z_revised = z - (inv_cov_c * d.x + inv_cov_e * d.y) / inv_cov_f;
-			mean_fused += z_revised * alpha * T;
 
-			T = test_T;
-			
-			// Keep track of last range entry to update this
-			// pixel. 
-			last_contributor = contributor;
+			float var_z = 1 / inv_cov_f;
+			float mean_z = z_revised;
+			float z_min = mean_z - 3.0f * sqrt(var_z);
+			float z_max = mean_z + 3.0f * sqrt(var_z);
+			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
 
-			if (first_contributor == 0)
-				first_contributor = contributor;
+			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
+			{
+				if (var_z < smallest_variance){
+					Z[z_index] += alpha;
+					continue;
+				}
+				float z = z_view_min + delta_z * (z_index + 0.5f);
+				float density = exp(-0.5f * (z - mean_z) * (z - mean_z) / var_z);
+				Z[z_index] += density * alpha;
+			}
 		}
 	}
 
@@ -414,11 +438,17 @@ renderCUDA(
 	{
 		final_T[pix_id] = T;
 		n_contrib[pix_id] = last_contributor;
-		fused_mean[pix_id] = mean_fused;
 		
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
-		out_z_density[pix_id] = mean_fused;
+		
+		for (int z_index = 0; z_index < z_index_max; z_index++)
+		{
+			if(Z[z_index] > 0.0f)
+			{
+				atomicAdd(&out_z_density[z_index * H + pix.y], Z[z_index]);
+			}
+		}
 		
 		first_contrib[pix_id] = first_contributor;
 	}
