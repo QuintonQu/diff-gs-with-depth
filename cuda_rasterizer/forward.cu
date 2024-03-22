@@ -195,17 +195,16 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if(is_sonar) {
-		if (!in_sonar_frustrum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+	// if(is_sonar) {
+	// 	if (!in_sonar_frustrum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+	// 		//printf("forward.cu, preprocessCUDA, not in frustum of sonar\n");
+	// 		return;
+	// 	}
+	// }
+	// else {
+	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
 			// printf("forward.cu, preprocessCUDA, not in frustum\n");
 			return;
-		}
-	}
-	else {
-		if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
-			// printf("forward.cu, preprocessCUDA, not in frustum\n");
-			return;
-		}
 	}
 	
 	// Transform point by projecting
@@ -333,7 +332,7 @@ renderCUDA(
 	float C[CHANNELS] = { 0 };
 
 	// Initialize z info
-	const int z_index_max = 200;
+	const int z_index_max = 512;
 	float z_view_max = 3.0;
 	float z_view_min = 0.75;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;

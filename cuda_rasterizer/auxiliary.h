@@ -152,6 +152,7 @@ __forceinline__ __device__ bool in_sonar_frustrum(int idx,
 	float r = sqrt(p_proj.x * p_proj.x + p_proj.y * p_proj.y + p_proj.z * p_proj.z);
 	float theta = atan2(p_proj.y, p_proj.x);
 	float phi = acos(p_proj.z / r);
+	printf("r: %f, theta: %f, phi: %f\n", r, theta, phi);
 	
 	// check that p_proj is within the sonar bounds of r_min r_max theta_min theta_max and phi_min phi_max 
 	bool r_check, theta_check, phi_check;

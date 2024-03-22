@@ -503,7 +503,7 @@ renderCUDA(
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	const int z_index_max = 6;
+	const int z_index_max = 512;
 	const float z_view_max = 0.75;
 	const float z_view_min = 3.0;
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;

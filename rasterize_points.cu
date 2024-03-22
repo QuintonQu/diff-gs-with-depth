@@ -62,7 +62,7 @@ RasterizeGaussiansCUDA(
   const int P = means3D.size(0);
   const int H = image_height;
   const int W = image_width;
-  const int D = 200;		// This is the resolution of the depth (default 200)
+  const int D = 512;		// This is the resolution of the depth (default 200)
 
   auto int_opts = means3D.options().dtype(torch::kInt32);
   auto float_opts = means3D.options().dtype(torch::kFloat32);
