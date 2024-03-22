@@ -46,7 +46,8 @@ namespace FORWARD
 		float* cov_z,
 		const dim3 grid,
 		uint32_t* tiles_touched,
-		bool prefiltered);
+		bool prefiltered,
+		bool is_sonar);
 
 	// Main rasterization method.
 	void render(

@@ -503,9 +503,9 @@ renderCUDA(
 	const float ddelx_dx = 0.5 * W;
 	const float ddely_dy = 0.5 * H;
 
-	const int z_index_max = 200;
-	const float z_view_max = 8.0;
-	const float z_view_min = 0.0;
+	const int z_index_max = 6;
+	const float z_view_max = 0.75;
+	const float z_view_min = 3.0;
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 3) * (delta_z / 3);

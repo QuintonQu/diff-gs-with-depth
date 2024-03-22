@@ -181,7 +181,8 @@ __global__ void preprocessCUDA(int P, int D, int M,
 	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered)
+	bool prefiltered,
+	bool is_sonar)
 {
 	auto idx = cg::this_grid().thread_rank();
 	if (idx >= P)
@@ -194,9 +195,17 @@ __global__ void preprocessCUDA(int P, int D, int M,
 
 	// Perform near culling, quit if outside.
 	float3 p_view;
-	if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
-		// printf("forward.cu, preprocessCUDA, not in frustum\n");
-		return;
+	if(is_sonar) {
+		if (!in_sonar_frustrum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+			// printf("forward.cu, preprocessCUDA, not in frustum\n");
+			return;
+		}
+	}
+	else {
+		if (!in_frustum(idx, orig_points, viewmatrix, projmatrix, prefiltered, p_view)){
+			// printf("forward.cu, preprocessCUDA, not in frustum\n");
+			return;
+		}
 	}
 	
 	// Transform point by projecting
@@ -325,8 +334,8 @@ renderCUDA(
 
 	// Initialize z info
 	const int z_index_max = 200;
-	float z_view_max = 8.0;
-	float z_view_min = 0.0;
+	float z_view_max = 3.0;
+	float z_view_min = 0.75;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 3) * (delta_z / 3);
@@ -394,6 +403,7 @@ renderCUDA(
 
 			float var_z = collected_cov_z[j];
 			float mean_z = collected_depth[j];
+			
 			float z_min = mean_z - 3.0f * sqrt(var_z);
 			float z_max = mean_z + 3.0f * sqrt(var_z);
 			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
@@ -411,6 +421,7 @@ renderCUDA(
 			}
 		}
 	}
+	//printf("forward.cu, renderCUDA, H: %d, W: %d\n", H, W); 
 
 	// All threads that treat valid pixel write out their final
 	// rendering data to the frame and auxiliary buffers.
@@ -490,7 +501,8 @@ void FORWARD::preprocess(int P, int D, int M,
 	float* cov_z,
 	const dim3 grid,
 	uint32_t* tiles_touched,
-	bool prefiltered
+	bool prefiltered,
+	bool is_sonar
 	)
 {
 	preprocessCUDA<NUM_CHANNELS> << <(P + 255) / 256, 256 >> > (
@@ -519,6 +531,7 @@ void FORWARD::preprocess(int P, int D, int M,
 		cov_z,
 		grid,
 		tiles_touched,
-		prefiltered
+		prefiltered,
+		is_sonar
 		);
 }

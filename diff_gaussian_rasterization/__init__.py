@@ -77,7 +77,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.sh_degree,
             raster_settings.campos,
             raster_settings.prefiltered,
-            raster_settings.debug
+            raster_settings.debug,
+            raster_settings.is_sonar
         )
 
         # Invoke C++/CUDA rasterizer
@@ -172,6 +173,7 @@ class GaussianRasterizationSettings(NamedTuple):
     campos : torch.Tensor
     prefiltered : bool
     debug : bool
+    is_sonar: bool
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):

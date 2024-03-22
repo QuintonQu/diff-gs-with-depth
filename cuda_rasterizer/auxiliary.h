@@ -136,6 +136,60 @@ __forceinline__ __device__ float sigmoid(float x)
 	return 1.0f / (1.0f + expf(-x));
 }
 
+__forceinline__ __device__ bool in_sonar_frustrum(int idx,
+	const float* orig_points,
+	const float* viewmatrix,
+	const float* projmatrix,
+	bool prefiltered,
+	float3& p_view)
+{
+	float3 p_orig = { orig_points[3 * idx], orig_points[3 * idx + 1], orig_points[3 * idx + 2] };
+	// bring points to sonar space
+	float4 p_hom = transformPoint4x4(p_orig, projmatrix);
+	float p_w = 1.0f / (p_hom.w + 0.0000001f);
+	float3 p_proj = { p_hom.x * p_w, p_hom.y * p_w, p_hom.z * p_w };
+	// convert to spherical coordinate 
+	float r = sqrt(p_proj.x * p_proj.x + p_proj.y * p_proj.y + p_proj.z * p_proj.z);
+	float theta = atan2(p_proj.y, p_proj.x);
+	float phi = acos(p_proj.z / r);
+	
+	// check that p_proj is within the sonar bounds of r_min r_max theta_min theta_max and phi_min phi_max 
+	bool r_check, theta_check, phi_check;
+	if (r < 0.75f || r > 3.0f)
+	{
+		r_check = false;
+	}
+	else
+	{
+		r_check = true;
+	}
+	float half_max_theta = 0.5026548245743668 / 2;
+	if (theta < -half_max_theta || theta > half_max_theta)
+	{
+		theta_check = false;
+	}
+	else
+	{
+		theta_check = true;
+	}
+	float half_max_phi = 0.24434609527920614 / 2;
+	if (phi < -half_max_phi || phi > half_max_phi)
+	{
+		phi_check = false;
+	}
+	else
+	{
+		phi_check = true;
+	}
+	// if any of the checks fail, return false
+	if (!r_check || !theta_check || !phi_check)
+	{
+		return false;
+	}
+	return true; 
+}
+
+
 __forceinline__ __device__ bool in_frustum(int idx,
 	const float* orig_points,
 	const float* viewmatrix,
