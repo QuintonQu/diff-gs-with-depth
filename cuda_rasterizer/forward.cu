@@ -325,7 +325,7 @@ renderCUDA(
 
 	// Initialize z info
 	const int z_index_max = 200;
-	float z_view_max = 8.0;
+	float z_view_max = 40.0;
 	float z_view_min = 0.0;
 	float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
@@ -396,8 +396,8 @@ renderCUDA(
 			float mean_z = collected_depth[j];
 			float z_min = mean_z - 3.0f * sqrt(var_z);
 			float z_max = mean_z + 3.0f * sqrt(var_z);
-			int z_max_index = min(z_index_max, int((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max));
-			int z_min_index = max(0, int((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max));
+			int z_max_index = min(z_index_max, int(ceil((z_max - z_view_min) / (z_view_max - z_view_min) * z_index_max)));
+			int z_min_index = max(0, int(floor((z_min - z_view_min) / (z_view_max - z_view_min) * z_index_max)));
 
 			for(int z_index = z_min_index; z_index < z_max_index; z_index++)
 			{
