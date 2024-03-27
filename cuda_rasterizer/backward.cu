@@ -504,8 +504,8 @@ renderCUDA(
 	const float ddely_dy = 0.5 * H;
 
 	const int z_index_max = 512;
-	const float z_view_max = 0.75;
-	const float z_view_min = 3.0;
+	const float z_view_max = 3.0;
+	const float z_view_min = 0.75;
 	const float delta_z = (z_view_max - z_view_min) / z_index_max;
 	// 6 * sqrt(var_z) > delta_z
 	float smallest_variance = (delta_z / 3) * (delta_z / 3);
@@ -513,9 +513,10 @@ renderCUDA(
 	if (inside){
 		for (int z_index = 0; z_index < z_index_max; z_index++){
 			dL_dZ[z_index] = dL_dZs_h[z_index * H + pix.y] + dL_dZs_w[z_index * W + pix.x];
+			//printf("dL_dZ[%d] = %f\n", z_index, dL_dZ[z_index]);
 		}
 	}
-			
+
 	// Traverse all Gaussians
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
 	{
